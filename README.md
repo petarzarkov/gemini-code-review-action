@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Run AI Code Review"
-        uses: petar-zarkov/gemini-code-review-action@latest
+        uses: petarzarkov/gemini-code-review-action@latest
         with:
           # Optional: Override the default exclude patterns
           # exclude: '*.md,*.json,package-lock.json,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*'
