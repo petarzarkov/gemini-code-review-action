@@ -145,7 +145,7 @@ export class GitHubService {
       const actionIssueComments = issueComments.data.filter(
         (comment) =>
           comment.user?.login === "github-actions[bot]" &&
-          comment.body?.includes(`[${pkg.name}:context]`)
+          comment.body?.includes(`<!-- [${pkg.name}:context] -->`)
       );
 
       const context: ConversationContext = {
@@ -216,14 +216,38 @@ ${contextSummary}
 ---
 *This comment helps maintain context across multiple review runs.*`;
 
-      await this.octokit.issues.createComment({
+      // Check if a context comment already exists
+      const issueComments = await this.octokit.issues.listComments({
         owner,
         repo,
         issue_number: pullNumber,
-        body: contextComment,
       });
 
-      logger.success("Conversation context saved");
+      const existingContextComment = issueComments.data.find(
+        (comment) =>
+          comment.user?.login === "github-actions[bot]" &&
+          comment.body?.includes(`<!-- [${pkg.name}:context] -->`)
+      );
+
+      if (existingContextComment) {
+        // Update existing comment
+        await this.octokit.issues.updateComment({
+          owner,
+          repo,
+          comment_id: existingContextComment.id,
+          body: contextComment,
+        });
+        logger.success("Conversation context updated in existing comment");
+      } else {
+        // Create new comment
+        await this.octokit.issues.createComment({
+          owner,
+          repo,
+          issue_number: pullNumber,
+          body: contextComment,
+        });
+        logger.success("Conversation context saved in new comment");
+      }
     } catch (error) {
       logger.error("Error saving conversation context:", error);
       // Don't throw - context saving is nice-to-have, not critical
