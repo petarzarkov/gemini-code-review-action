@@ -25089,9 +25089,9 @@ const node_fs_1 = __importDefault(__nccwpck_require__(3024));
 const node_path_1 = __importDefault(__nccwpck_require__(6760));
 const genai_1 = __nccwpck_require__(7002);
 const rest_1 = __nccwpck_require__(2875);
-const logger_1 = __nccwpck_require__(1661);
-const helpers_1 = __nccwpck_require__(8459);
-const parse_diff_1 = __importDefault(__nccwpck_require__(9812));
+const logger_1 = __nccwpck_require__(187);
+const helpers_1 = __nccwpck_require__(4482);
+const diff_parser_1 = __importDefault(__nccwpck_require__(3855));
 const package_json_1 = __importDefault(__nccwpck_require__(8330));
 class CodeReviewService {
     octokit;
@@ -25222,7 +25222,7 @@ class CodeReviewService {
         }
     }
     parseDiff(diffStr) {
-        const parsedFiles = (0, parse_diff_1.default)(diffStr);
+        const parsedFiles = (0, diff_parser_1.default)(diffStr);
         return this.convertParsedFilesToFileData(parsedFiles);
     }
     convertParsedFilesToFileData(parsedFiles) {
@@ -25309,7 +25309,7 @@ class CodeReviewService {
             return this.promptTemplate;
         }
         try {
-            const promptPath = node_path_1.default.join(__dirname, "prompt.txt");
+            const promptPath = node_path_1.default.join(__dirname, "config/prompt.txt");
             this.promptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
             return this.promptTemplate;
         }
@@ -25501,95 +25501,7 @@ if (require.main === require.cache[eval('__filename')]) {
 
 /***/ }),
 
-/***/ 8459:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.matchesPattern = matchesPattern;
-exports.parseExcludePatterns = parseExcludePatterns;
-exports.interpolate = interpolate;
-function createPatternRegex(pattern) {
-    const escapedPattern = pattern
-        .replace(/\./g, "\\.")
-        .replace(/\*/g, ".*")
-        .replace(/\?/g, ".");
-    return new RegExp(`^${escapedPattern}$`);
-}
-function matchesPattern(filePath, pattern) {
-    const regex = createPatternRegex(pattern);
-    return regex.test(filePath);
-}
-function parseExcludePatterns(excludeInput) {
-    if (!excludeInput || !excludeInput.trim()) {
-        return [];
-    }
-    return excludeInput
-        .split(",")
-        .map((pattern) => pattern.trim())
-        .filter((pattern) => pattern.length > 0);
-}
-function interpolate(template, variables) {
-    return template.replace(/\{(\w+)\}/g, (match, key) => {
-        return variables[key] !== undefined ? variables[key] : match;
-    });
-}
-
-
-/***/ }),
-
-/***/ 1661:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.logger = exports.colors = void 0;
-// ANSI color codes for console logging
-exports.colors = {
-    reset: "\x1b[0m",
-    bright: "\x1b[1m",
-    red: "\x1b[31m",
-    green: "\x1b[32m",
-    yellow: "\x1b[33m",
-    blue: "\x1b[34m",
-    magenta: "\x1b[35m",
-    cyan: "\x1b[36m",
-    white: "\x1b[37m",
-    gray: "\x1b[90m",
-};
-exports.logger = {
-    verbose: (message) => {
-        console.log(`${exports.colors.magenta}ℹ ${message}${exports.colors.reset}`);
-    },
-    info: (message) => {
-        console.log(`${exports.colors.blue}ℹ ${message}${exports.colors.reset}`);
-    },
-    success: (message) => {
-        console.log(`${exports.colors.green}✓ ${message}${exports.colors.reset}`);
-    },
-    warn: (message) => {
-        console.log(`${exports.colors.yellow}⚠ ${message}${exports.colors.reset}`);
-    },
-    error: (message, error) => {
-        console.log(`${exports.colors.red}✗ ${message}${exports.colors.reset}`);
-        if (error) {
-            console.error(error);
-        }
-    },
-    processing: (message) => {
-        console.log(`${exports.colors.cyan}⚙ ${message}${exports.colors.reset}`);
-    },
-    debug: (message) => {
-        console.log(`${exports.colors.gray}🔍 ${message}${exports.colors.reset}`);
-    },
-};
-
-
-/***/ }),
-
-/***/ 9812:
+/***/ 3855:
 /***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
@@ -25843,6 +25755,94 @@ const formTrimmingString = (trimmingChars) => {
 };
 const makeString = (itemToConvert) => (itemToConvert ?? "") + "";
 exports["default"] = parseDiff;
+
+
+/***/ }),
+
+/***/ 4482:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.matchesPattern = matchesPattern;
+exports.parseExcludePatterns = parseExcludePatterns;
+exports.interpolate = interpolate;
+function createPatternRegex(pattern) {
+    const escapedPattern = pattern
+        .replace(/\./g, "\\.")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".");
+    return new RegExp(`^${escapedPattern}$`);
+}
+function matchesPattern(filePath, pattern) {
+    const regex = createPatternRegex(pattern);
+    return regex.test(filePath);
+}
+function parseExcludePatterns(excludeInput) {
+    if (!excludeInput || !excludeInput.trim()) {
+        return [];
+    }
+    return excludeInput
+        .split(",")
+        .map((pattern) => pattern.trim())
+        .filter((pattern) => pattern.length > 0);
+}
+function interpolate(template, variables) {
+    return template.replace(/\{(\w+)\}/g, (match, key) => {
+        return variables[key] !== undefined ? variables[key] : match;
+    });
+}
+
+
+/***/ }),
+
+/***/ 187:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.logger = exports.colors = void 0;
+// ANSI color codes for console logging
+exports.colors = {
+    reset: "\x1b[0m",
+    bright: "\x1b[1m",
+    red: "\x1b[31m",
+    green: "\x1b[32m",
+    yellow: "\x1b[33m",
+    blue: "\x1b[34m",
+    magenta: "\x1b[35m",
+    cyan: "\x1b[36m",
+    white: "\x1b[37m",
+    gray: "\x1b[90m",
+};
+exports.logger = {
+    verbose: (message) => {
+        console.log(`${exports.colors.magenta}ℹ ${message}${exports.colors.reset}`);
+    },
+    info: (message) => {
+        console.log(`${exports.colors.blue}ℹ ${message}${exports.colors.reset}`);
+    },
+    success: (message) => {
+        console.log(`${exports.colors.green}✓ ${message}${exports.colors.reset}`);
+    },
+    warn: (message) => {
+        console.log(`${exports.colors.yellow}⚠ ${message}${exports.colors.reset}`);
+    },
+    error: (message, error) => {
+        console.log(`${exports.colors.red}✗ ${message}${exports.colors.reset}`);
+        if (error) {
+            console.error(error);
+        }
+    },
+    processing: (message) => {
+        console.log(`${exports.colors.cyan}⚙ ${message}${exports.colors.reset}`);
+    },
+    debug: (message) => {
+        console.log(`${exports.colors.gray}🔍 ${message}${exports.colors.reset}`);
+    },
+};
 
 
 /***/ }),
@@ -48805,7 +48805,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && cp src/prompt.txt dist/prompt.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && cp src/prompt.txt build/prompt.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && mkdir -p dist/config && cp src/config/prompt.txt dist/config/prompt.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && mkdir -p build/config && cp src/config/prompt.txt build/config/prompt.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

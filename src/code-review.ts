@@ -10,10 +10,18 @@ import {
   ReviewComment,
   AiReviewResponse,
   AiResponseData,
-} from "./code-review.types";
-import { logger } from "./logger";
-import { interpolate, matchesPattern, parseExcludePatterns } from "./helpers";
-import parseDiff, { ParsedFile, DiffChunk, DiffChange } from "./parse-diff";
+} from "./types/code-review";
+import { logger } from "./utils/logger";
+import {
+  interpolate,
+  matchesPattern,
+  parseExcludePatterns,
+} from "./utils/helpers";
+import parseDiff, {
+  ParsedFile,
+  DiffChunk,
+  DiffChange,
+} from "./parsers/diff-parser";
 import pkg from "../package.json";
 
 export class CodeReviewService {
@@ -328,7 +336,7 @@ export class CodeReviewService {
     }
 
     try {
-      const promptPath = path.join(__dirname, "prompt.txt");
+      const promptPath = path.join(__dirname, "config/prompt.txt");
       this.promptTemplate = fs.readFileSync(promptPath, "utf8");
       return this.promptTemplate;
     } catch (error) {
