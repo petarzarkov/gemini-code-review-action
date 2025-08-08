@@ -140,7 +140,7 @@ export function createContextSummary(
 
   const lastActivity = getLastActivityDate(context);
   if (lastActivity) {
-    parts.push(`🕒 **Last Activity**: ${lastActivity.toLocaleDateString()}`);
+    parts.push(`🕒 **Last Activity**: ${lastActivity.toUTCString()}`);
   }
 
   return parts.join("\n");

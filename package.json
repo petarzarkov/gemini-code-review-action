@@ -1,6 +1,6 @@
 {
   "name": "gemini-code-review-action",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "An AI code review GitHub Action using Google Gemini.",
   "main": "dist/index.js",
   "scripts": {

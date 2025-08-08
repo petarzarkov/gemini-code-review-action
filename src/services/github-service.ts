@@ -195,15 +195,21 @@ export class GitHubService {
     owner: string,
     repo: string,
     pullNumber: number,
-    contextSummary: string
+    contextSummary: string,
+    reviewCount: number = 1
   ): Promise<void> {
     try {
       logger.processing("Saving conversation context summary");
 
+      const reviewText =
+        reviewCount === 1
+          ? "This PR has been reviewed for the first time"
+          : `This PR has been reviewed ${reviewCount} times`;
+
       const contextComment = `<!-- [${pkg.name}:context] -->
 ### 🔄 Conversation Context Updated
 
-This PR has been reviewed multiple times. Here's a summary of the ongoing conversation:
+${reviewText}. Here's a summary of the ongoing conversation:
 
 ${contextSummary}
 

@@ -110,11 +110,14 @@ export class CodeReviewService {
             } on the latest changes`
           );
 
+          const totalReviews = conversationContext.previousReviews.length + 1; // +1 for current review
+
           await this.githubService.saveConversationContext(
             prDetails.owner,
             prDetails.repo,
             prDetails.pullNumber,
-            contextSummary
+            contextSummary,
+            totalReviews
           );
         }
       } else {
@@ -132,11 +135,14 @@ export class CodeReviewService {
             "No new issues found in the latest changes"
           );
 
+          const totalReviews = conversationContext.previousReviews.length + 1; // +1 for current review
+
           await this.githubService.saveConversationContext(
             prDetails.owner,
             prDetails.repo,
             prDetails.pullNumber,
-            contextSummary
+            contextSummary,
+            totalReviews
           );
         }
       }

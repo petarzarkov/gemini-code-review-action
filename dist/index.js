@@ -25139,7 +25139,8 @@ class CodeReviewService {
                 // Save conversation context for future runs (if enabled)
                 if (this.enableConversationContext && conversationContext) {
                     const contextSummary = (0, conversation_context_1.createContextSummary)(conversationContext, `Generated ${comments.length} new comment${comments.length > 1 ? "s" : ""} on the latest changes`);
-                    await this.githubService.saveConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber, contextSummary);
+                    const totalReviews = conversationContext.previousReviews.length + 1; // +1 for current review
+                    await this.githubService.saveConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber, contextSummary, totalReviews);
                 }
             }
             else {
@@ -25150,7 +25151,8 @@ class CodeReviewService {
                     (conversationContext.previousReviews.length > 0 ||
                         conversationContext.previousComments.length > 0)) {
                     const contextSummary = (0, conversation_context_1.createContextSummary)(conversationContext, "No new issues found in the latest changes");
-                    await this.githubService.saveConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber, contextSummary);
+                    const totalReviews = conversationContext.previousReviews.length + 1; // +1 for current review
+                    await this.githubService.saveConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber, contextSummary, totalReviews);
                 }
             }
         }
@@ -26120,13 +26122,16 @@ class GitHubService {
             };
         }
     }
-    async saveConversationContext(owner, repo, pullNumber, contextSummary) {
+    async saveConversationContext(owner, repo, pullNumber, contextSummary, reviewCount = 1) {
         try {
             logger_1.logger.processing("Saving conversation context summary");
+            const reviewText = reviewCount === 1
+                ? "This PR has been reviewed for the first time"
+                : `This PR has been reviewed ${reviewCount} times`;
             const contextComment = `<!-- [${package_json_1.default.name}:context] -->
 ### 🔄 Conversation Context Updated
 
-This PR has been reviewed multiple times. Here's a summary of the ongoing conversation:
+${reviewText}. Here's a summary of the ongoing conversation:
 
 ${contextSummary}
 
@@ -26257,7 +26262,7 @@ function createContextSummary(context, currentReviewSummary) {
     }
     const lastActivity = getLastActivityDate(context);
     if (lastActivity) {
-        parts.push(`🕒 **Last Activity**: ${lastActivity.toLocaleDateString()}`);
+        parts.push(`🕒 **Last Activity**: ${lastActivity.toUTCString()}`);
     }
     return parts.join("\n");
 }
@@ -49427,7 +49432,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.6","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.7","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 
