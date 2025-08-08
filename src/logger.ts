@@ -25,7 +25,7 @@ export const logger = {
   warn: (message: string): void => {
     console.log(`${colors.yellow}⚠ ${message}${colors.reset}`);
   },
-  error: (message: string, error?: Error): void => {
+  error: (message: string, error?: unknown): void => {
     console.log(`${colors.red}✗ ${message}${colors.reset}`);
     if (error) {
       console.error(error);

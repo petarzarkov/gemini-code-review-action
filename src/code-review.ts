@@ -14,15 +14,18 @@ import {
 import { logger } from "./logger";
 import { interpolate, matchesPattern, parseExcludePatterns } from "./helpers";
 import parseDiff, { ParsedFile, DiffChunk, DiffChange } from "./parse-diff";
+import pkg from "../package.json";
 
 export class CodeReviewService {
   private readonly octokit: Octokit;
   private readonly genAi: GoogleGenAI;
   private readonly excludePatterns: string[];
-  private readonly modelName: string;
+  private currentModelName: string;
+  private readonly rpmLimits: Record<string, number>;
+  private readonly modelHierarchy: string[];
   private promptTemplate: string | null = null;
   private lastRequestTime: number = 0;
-  private readonly rateLimitDelay: number;
+  private rateLimitDelay: number = 0;
 
   constructor(
     githubToken: string,
@@ -32,10 +35,9 @@ export class CodeReviewService {
     this.octokit = new Octokit({ auth: githubToken });
     this.genAi = new GoogleGenAI({ apiKey: geminiApiKey });
     this.excludePatterns = excludePatterns;
-    this.modelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-lite";
+    this.currentModelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-lite";
 
-    // Calculate rate limit delay based on model
-    const rpmLimits: Record<string, number> = {
+    this.rpmLimits = {
       "gemini-2.5-pro": 5,
       "gemini-2.5-flash": 10,
       "gemini-2.5-flash-lite": 15,
@@ -43,12 +45,61 @@ export class CodeReviewService {
       "gemini-2.0-flash-lite": 30,
     };
 
-    const rpm = rpmLimits[this.modelName] || 5;
-    this.rateLimitDelay = Math.ceil(60000 / rpm); // ms between requests
+    this.modelHierarchy = Object.keys(this.rpmLimits).sort(
+      (a, b) => this.rpmLimits[b] - this.rpmLimits[a]
+    );
+
+    this.updateRateLimitDelay();
 
     logger.info(
-      `Using model: ${this.modelName} with ${rpm} RPM (${this.rateLimitDelay}ms delay)`
+      `Starting with model: ${this.currentModelName} with ${
+        this.rpmLimits[this.currentModelName] || 5
+      } RPM (${this.rateLimitDelay}ms delay)`
     );
+  }
+
+  private updateRateLimitDelay(): void {
+    const rpm = this.rpmLimits[this.currentModelName] || 5;
+    this.rateLimitDelay = Math.ceil(60000 / rpm);
+  }
+
+  private getNextLowerModel(): string | null {
+    const currentIndex = this.modelHierarchy.indexOf(this.currentModelName);
+
+    if (
+      currentIndex === -1 ||
+      currentIndex === this.modelHierarchy.length - 1
+    ) {
+      return null;
+    }
+
+    return this.modelHierarchy[currentIndex + 1];
+  }
+
+  private derankModel(): boolean {
+    const nextModel = this.getNextLowerModel();
+
+    if (!nextModel) {
+      logger.warn(
+        `Already using the lowest model (${this.currentModelName}), cannot derank further`
+      );
+      return false;
+    }
+
+    const oldModel = this.currentModelName;
+    this.currentModelName = nextModel;
+    this.updateRateLimitDelay();
+
+    logger.warn(
+      `Deranked from ${oldModel} to ${this.currentModelName} due to rate limits`
+    );
+    logger.info(
+      `New rate limit: ${this.rpmLimits[this.currentModelName]} RPM (${
+        this.rateLimitDelay
+      }ms delay)`
+    );
+
+    return true;
   }
 
   public async processCodeReview(): Promise<void> {
@@ -177,7 +228,6 @@ export class CodeReviewService {
     return {
       header: chunk.content,
       lines: chunk.changes.map((change) => this.convertChangeToLine(change)),
-      startPosition: 0, // Not used - GitHub API counts from 1 after @@
     };
   }
 
@@ -319,7 +369,7 @@ export class CodeReviewService {
       await this.enforceRateLimit();
 
       const generationConfig = {
-        // maxOutputTokens: 8192 / 2,
+        maxOutputTokens: 8192,
         temperature: 0.8,
         topP: 0.95,
       };
@@ -329,7 +379,7 @@ export class CodeReviewService {
       );
       const result = await this.genAi.models.generateContent({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        model: this.modelName,
+        model: this.currentModelName,
         config: generationConfig,
       });
 
@@ -363,10 +413,12 @@ export class CodeReviewService {
       logger.warn("Invalid response format from AI");
       return [];
     } catch (error) {
-      logger.error(`Error calling Gemini AI (attempt ${retryCount + 1}):`);
-      console.error(error);
+      logger.error(
+        `Error calling Gemini AI (attempt ${retryCount + 1}):`,
+        error
+      );
 
-      // Check if it's a rate limit error and retry with exponential backoff
+      // Check if it's a rate limit error and retry with exponential backoff or deranking
       if (
         error &&
         typeof error === "object" &&
@@ -374,6 +426,15 @@ export class CodeReviewService {
         error.status === 429
       ) {
         if (retryCount < maxRetries) {
+          // Try deranking to a lower model first
+          if (retryCount === 0 && this.derankModel()) {
+            logger.info(
+              `Retrying with deranked model: ${this.currentModelName}`
+            );
+            return this.getAiResponse(prompt, retryCount + 1);
+          }
+
+          // Fall back to exponential backoff if deranking not possible or already tried
           const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
           logger.warn(
             `Rate limit exceeded. Retrying in ${backoffDelay}ms... (${
@@ -398,7 +459,14 @@ export class CodeReviewService {
     if (timeSinceLastRequest < this.rateLimitDelay) {
       const waitTime = this.rateLimitDelay - timeSinceLastRequest;
       logger.debug(`Rate limiting: waiting ${waitTime}ms before next request`);
-      await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+      for (let remaining = waitTime; remaining > 0; remaining -= 1000) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(1000, remaining))
+        );
+        if (remaining > 1000)
+          logger.debug(`Rate limiting: ${remaining - 1000}ms remaining`);
+      }
     }
 
     this.lastRequestTime = Date.now();
@@ -480,7 +548,7 @@ export class CodeReviewService {
         owner,
         repo,
         pull_number: pullNumber,
-        body: `${this.modelName} code review comments`,
+        body: `${pkg.name} comments`,
         comments: comments.map((comment) => ({
           path: comment.path,
           position: comment.position,
@@ -528,7 +596,7 @@ async function main(): Promise<void> {
 
     logger.success("✨ Code Review completed successfully!");
   } catch (error) {
-    logger.error("💥 Error in main:", error as Error);
+    logger.error("💥 Error in main:", error);
     process.exit(1);
   }
 }

@@ -9,7 +9,6 @@ export interface PullRequestDetails {
 export interface HunkData {
   header: string;
   lines: string[];
-  startPosition: number;
 }
 
 export interface FileData {

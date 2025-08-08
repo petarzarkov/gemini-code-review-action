@@ -1,8 +1,14 @@
 # Gemini AI Code Review Action
 
+## Free to use, deranks the model if rate limits are hit
+
 [](https://www.google.com/search?q=https://github.com/marketplace/actions/gemini-ai-code-review-action) [](https://opensource.org/licenses/MIT)
 
 This GitHub Action uses Google's powerful Gemini family of models to perform an automated, AI-powered code review on your pull requests. It analyzes the code changes (diffs) and posts review comments directly on the relevant lines, helping you catch potential issues, improve code quality, and accelerate the review process.
+
+- handles the Gemini API limits
+- provides multiple comments for everything reviewed under one parent comment
+- no need to trigger the action by writing comments in your PR, it happens automatically on PR events
 
 ## How It Works
 
@@ -52,7 +58,7 @@ jobs:
         uses: petar-zarkov/gemini-code-review-action@v1
         with:
           # Optional: Override the default exclude patterns
-          # exclude: 'dist/*,**/*.lock,**/*.md'
+          # exclude: 'dist/*,**/*.lock,**/*.md' # defaults are "*.md,*.json,package-lock.json,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*"
         env:
           # The API key you stored in your repository secrets
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

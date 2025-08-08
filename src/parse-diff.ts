@@ -60,7 +60,7 @@ const parseDiff = (input: string): ParsedFile[] => {
       normal: true,
       ln1: deletedLineCounter++,
       ln2: addedLineCounter++,
-      content: line,
+      content: line.slice(1), // slice the space from the line
     });
     currentFileChanges.oldLines--;
     currentFileChanges.newLines--;
@@ -177,7 +177,7 @@ const parseDiff = (input: string): ParsedFile[] => {
       type: "del",
       del: true,
       ln: deletedLineCounter++,
-      content: line,
+      content: line.slice(1), // slice the - from the line
     });
     currentFile.deletions++;
     currentFileChanges.oldLines--;
@@ -190,7 +190,7 @@ const parseDiff = (input: string): ParsedFile[] => {
       type: "add",
       add: true,
       ln: addedLineCounter++,
-      content: line,
+      content: line.slice(1), // slice the + from the line
     });
     currentFile.additions++;
     currentFileChanges.newLines--;
