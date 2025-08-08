@@ -24,7 +24,7 @@ export interface ReviewComment {
 }
 
 export interface AiReviewResponse {
-  lineNumber: number;
+  lineContent: string;
   reviewComment: string;
 }
 

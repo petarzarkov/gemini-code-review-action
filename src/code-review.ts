@@ -356,7 +356,7 @@ export class CodeReviewService {
 
       if (data.reviews && Array.isArray(data.reviews)) {
         return data.reviews.filter(
-          (review) => review.lineNumber && review.reviewComment
+          (review) => review.lineContent && review.reviewComment
         );
       }
 
@@ -416,52 +416,38 @@ export class CodeReviewService {
 
     for (const aiResponse of aiResponses) {
       try {
-        const lineNumber = aiResponse.lineNumber;
+        const { lineContent, reviewComment } = aiResponse;
 
-        // Ensure line number is within valid range (1-based)
-        if (lineNumber < 1 || lineNumber > hunk.lines.length) {
+        // The line content from the AI must be a non-empty string and start with '+'
+        if (!lineContent || !lineContent.trim().startsWith("+")) {
           logger.warn(
-            `Line number ${lineNumber} is outside hunk range (1-${hunk.lines.length})`
+            `AI response provided invalid or non-added lineContent, skipping: "${lineContent}"`
           );
           continue;
         }
 
-        // Get the target line (convert to 0-based index)
-        const targetLine = hunk.lines[lineNumber - 1];
-        if (!targetLine) {
-          logger.warn(`No line found at position ${lineNumber}`);
+        // Find the position of this exact line within the hunk.
+        // The position is the 1-based index of the line in the hunk array.
+        const position =
+          hunk.lines.findIndex((hunkLine) => hunkLine === lineContent) + 1;
+
+        // If we couldn't find the line in the hunk, the AI hallucinated. Skip it.
+        if (position === 0) {
+          logger.warn(
+            `AI provided lineContent that was not found in the hunk, skipping: "${lineContent}"`
+          );
           continue;
         }
-
-        // Skip deleted lines - we can't comment on them
-        if (targetLine.startsWith("-")) {
-          logger.debug(`Skipping deleted line ${lineNumber}: ${targetLine}`);
-          continue;
-        }
-
-        // Only comment on added lines (+ prefix) for better reliability
-        if (!targetLine.startsWith("+")) {
-          logger.debug(`Skipping non-added line ${lineNumber}: ${targetLine}`);
-          continue;
-        }
-
-        // GitHub API position: line number within hunk (1-based)
-        // Position counting starts fresh after each @@ hunk header
-        const diffPosition = lineNumber;
-
-        logger.debug(
-          `Target line ${lineNumber}: "${targetLine.trim()}" (diff pos: ${diffPosition})`
-        );
 
         const comment: ReviewComment = {
-          body: aiResponse.reviewComment,
+          body: reviewComment,
           path: filePath,
-          position: diffPosition,
+          position: position, // Use our calculated, trusted position
         };
 
         comments.push(comment);
         logger.debug(
-          `Created comment for line ${lineNumber}: ${aiResponse.reviewComment.substring(
+          `Created comment for position ${position}: ${reviewComment.substring(
             0,
             50
           )}...`
