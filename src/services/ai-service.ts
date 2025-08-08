@@ -22,9 +22,10 @@ export class AIService {
   private lastRequestTime: number = 0;
   private rateLimitDelay: number = 0;
 
-  constructor(geminiApiKey: string) {
+  constructor(geminiApiKey: string, model?: string) {
     this.genAi = new GoogleGenAI({ apiKey: geminiApiKey });
-    this.currentModelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-lite";
+    this.currentModelName =
+      model || process.env.GEMINI_MODEL || "gemini-2.5-pro";
 
     this.rpmLimits = {
       "gemini-2.5-pro": 5,

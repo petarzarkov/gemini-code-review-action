@@ -10,35 +10,12 @@ This GitHub Action uses Google's powerful Gemini family of models to perform an 
 - provides multiple comments for everything reviewed under one parent comment
 - no need to trigger the action by writing comments in your PR, it happens automatically on PR events
 
-## How It Works
+## Setup
 
-The action triggers on pull requests, fetches the diff, and sends each changed hunk of code to the Gemini API with a specialized prompt. The AI's feedback is then formatted and posted back to the pull request as review comments.
-
-## Inputs
-
-The action's behavior can be customized with the following input:
-
-| Input     | Description                                                                   | Default                                                                                         |
-| :-------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- |
-| `exclude` | A comma-separated list of glob patterns for files to exclude from the review. | `*.md,*.json,package-lock.json,*.yaml,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*` |
-
-## Secrets
-
-This action requires the following secrets to be set in your repository:
-
-| Secret           | Description                                                                                                                                                                      |
-| :--------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GEMINI_API_KEY` | **Required.** Your API key for the Google Gemini API. You can obtain one from [Google AI Studio](https://aistudio.google.com/app/apikey).                                        |
-| `GITHUB_TOKEN`   | **Provided by GitHub.** This token is used to post comments on your pull request. The workflow needs `pull-requests: write` permissions for this to work. See the example below. |
-
-To add the `GEMINI_API_KEY`, go to your repository's `Settings` \> `Secrets and variables` \> `Actions`, and create a new repository secret.
-
-## Usage Example
-
-Create a new workflow file in your repository at `.github/workflows/ai-review.yml`:
+Create a new workflow file in your repository at `.github/workflows/code-review.yml`:
 
 ```yaml
-name: "AI Code Review"
+name: "Code Review"
 
 on:
   pull_request:
@@ -54,23 +31,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: "Run AI Code Review"
-        # Replace 'petar-zarkov/gemini-code-review-action@v1' with your repository and version
-        uses: petar-zarkov/gemini-code-review-action@v1
+        uses: petar-zarkov/gemini-code-review-action@latest
         with:
           # Optional: Override the default exclude patterns
-          # exclude: 'dist/*,**/*.lock,**/*.md' # defaults are "*.md,*.json,package-lock.json,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*"
-        env:
-          # The API key you stored in your repository secrets
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-          # The token is automatically provided by GitHub
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # exclude: '*.md,*.json,package-lock.json,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*'
+          model: gemini-2.0-flash-lite # default is gemini-2.5-pro
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 ```
 
-## Author
+## How It Works
 
-Created by **Petar Zarkov**.
+The action triggers on pull requests, fetches the diff, and sends a batch of changed hunks of code to the Gemini API with a specialized prompt. The AI's feedback is then formatted and posted back to the pull request as review comments for the relevant changes.
 
-## License
+## Inputs
 
-This project is licensed under the MIT License.
+The action's behavior can be customized with the following input:
+
+| Input     | Description                                                                   | Default                                                                                         |
+| :-------- | :---------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- |
+| `exclude` | A comma-separated list of glob patterns for files to exclude from the review. | `*.md,*.json,package-lock.json,*.yaml,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*` |
+
+## Secrets
+
+This action requires the following secrets to be set in your repository:
+
+| Secret           | Description                                                                                                                                                                                              |
+| :--------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY` | **Required.** Your API key for the Google Gemini API. You can obtain one with a free tier from [Google AI Studio](https://aistudio.google.com/app/apikey).                                               |
+| `GITHUB_TOKEN`   | **Provided by GitHub.** This token is used to post comments on your pull request. The workflow needs `pull-requests: write` permissions for this to work. The token is automatically provided by GitHub. |
+
+To add the `GEMINI_API_KEY`, go to your repository's `Settings` \> `Secrets and variables` \> `Actions`, and create a new repository secret.

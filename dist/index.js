@@ -25357,9 +25357,10 @@ class AIService {
     batchPromptTemplate = null;
     lastRequestTime = 0;
     rateLimitDelay = 0;
-    constructor(geminiApiKey) {
+    constructor(geminiApiKey, model) {
         this.genAi = new genai_1.GoogleGenAI({ apiKey: geminiApiKey });
-        this.currentModelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-lite";
+        this.currentModelName =
+            model || process.env.GEMINI_MODEL || "gemini-2.5-pro";
         this.rpmLimits = {
             "gemini-2.5-pro": 5,
             "gemini-2.5-flash": 10,
@@ -48882,7 +48883,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.1","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 
@@ -48970,9 +48971,9 @@ class CodeReviewService {
     aiService;
     batchProcessor;
     excludePatterns;
-    constructor(githubToken, geminiApiKey, excludePatterns = []) {
+    constructor(githubToken, geminiApiKey, excludePatterns = [], model) {
         this.githubService = new github_service_1.GitHubService(githubToken);
-        this.aiService = new ai_service_1.AIService(geminiApiKey);
+        this.aiService = new ai_service_1.AIService(geminiApiKey, model);
         this.batchProcessor = new batch_processor_1.BatchProcessor();
         this.excludePatterns = excludePatterns;
     }
@@ -49100,17 +49101,19 @@ exports.CodeReviewService = CodeReviewService;
 async function main() {
     try {
         const githubToken = process.env.GITHUB_TOKEN;
-        const geminiApiKey = process.env.GEMINI_API_KEY;
+        // GitHub Action inputs are prefixed with INPUT_
+        const geminiApiKey = process.env.INPUT_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
         const excludeInput = process.env.INPUT_EXCLUDE || "";
+        const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
         if (!githubToken) {
             throw new Error("GITHUB_TOKEN environment variable is required");
         }
         if (!geminiApiKey) {
-            throw new Error("GEMINI_API_KEY environment variable is required");
+            throw new Error("GEMINI_API_KEY or INPUT_GEMINI_API_KEY environment variable is required");
         }
         const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
-        logger_1.logger.verbose(`🚀 Starting Code Review with exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns);
+        logger_1.logger.verbose(`🚀 Starting Code Review with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model);
         await codeReviewService.processCodeReview();
         logger_1.logger.success("✨ Code Review completed successfully!");
     }
