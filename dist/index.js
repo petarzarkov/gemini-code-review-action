@@ -25075,432 +25075,6 @@ function socketOnError() {
 
 /***/ }),
 
-/***/ 6549:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.CodeReviewService = void 0;
-const node_fs_1 = __importDefault(__nccwpck_require__(3024));
-const node_path_1 = __importDefault(__nccwpck_require__(6760));
-const genai_1 = __nccwpck_require__(7002);
-const rest_1 = __nccwpck_require__(2875);
-const logger_1 = __nccwpck_require__(187);
-const helpers_1 = __nccwpck_require__(4482);
-const diff_parser_1 = __importDefault(__nccwpck_require__(3855));
-const package_json_1 = __importDefault(__nccwpck_require__(8330));
-class CodeReviewService {
-    octokit;
-    genAi;
-    excludePatterns;
-    currentModelName;
-    rpmLimits;
-    modelHierarchy;
-    promptTemplate = null;
-    lastRequestTime = 0;
-    rateLimitDelay = 0;
-    constructor(githubToken, geminiApiKey, excludePatterns = []) {
-        this.octokit = new rest_1.Octokit({ auth: githubToken });
-        this.genAi = new genai_1.GoogleGenAI({ apiKey: geminiApiKey });
-        this.excludePatterns = excludePatterns;
-        this.currentModelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-lite";
-        this.rpmLimits = {
-            "gemini-2.5-pro": 5,
-            "gemini-2.5-flash": 10,
-            "gemini-2.5-flash-lite": 15,
-            "gemini-2.0-flash": 15,
-            "gemini-2.0-flash-lite": 30,
-        };
-        this.modelHierarchy = Object.keys(this.rpmLimits).sort((a, b) => this.rpmLimits[b] - this.rpmLimits[a]);
-        this.updateRateLimitDelay();
-        logger_1.logger.info(`Starting with model: ${this.currentModelName} with ${this.rpmLimits[this.currentModelName] || 5} RPM (${this.rateLimitDelay}ms delay)`);
-    }
-    updateRateLimitDelay() {
-        const rpm = this.rpmLimits[this.currentModelName] || 5;
-        this.rateLimitDelay = Math.ceil(60000 / rpm);
-    }
-    getNextLowerModel() {
-        const currentIndex = this.modelHierarchy.indexOf(this.currentModelName);
-        if (currentIndex === -1 ||
-            currentIndex === this.modelHierarchy.length - 1) {
-            return null;
-        }
-        return this.modelHierarchy[currentIndex + 1];
-    }
-    derankModel() {
-        const nextModel = this.getNextLowerModel();
-        if (!nextModel) {
-            logger_1.logger.warn(`Already using the lowest model (${this.currentModelName}), cannot derank further`);
-            return false;
-        }
-        const oldModel = this.currentModelName;
-        this.currentModelName = nextModel;
-        this.updateRateLimitDelay();
-        logger_1.logger.warn(`Deranked from ${oldModel} to ${this.currentModelName} due to rate limits`);
-        logger_1.logger.info(`New rate limit: ${this.rpmLimits[this.currentModelName]} RPM (${this.rateLimitDelay}ms delay)`);
-        return true;
-    }
-    async processCodeReview() {
-        try {
-            const prDetails = this.getPullRequestDetails();
-            const eventName = process.env.GITHUB_EVENT_NAME;
-            if (eventName !== "pull_request") {
-                logger_1.logger.warn(`Unsupported event: ${eventName}`);
-                return;
-            }
-            const diff = await this.getPullRequestDiff(prDetails.owner, prDetails.repo, prDetails.pullNumber);
-            if (!diff) {
-                logger_1.logger.warn("No diff found for this pull request");
-                return;
-            }
-            const parsedDiff = this.parseDiff(diff);
-            const filteredDiff = this.filterFilesByExcludePatterns(parsedDiff);
-            logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
-                .map((f) => f.path)
-                .join(", ")}`);
-            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails);
-            if (comments.length > 0) {
-                await this.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
-                logger_1.logger.success(`Created ${comments.length} review comments`);
-            }
-            else {
-                logger_1.logger.info("No review comments generated");
-            }
-        }
-        catch (error) {
-            logger_1.logger.error("Error in code review process:");
-            console.error(error);
-            throw error;
-        }
-    }
-    getPullRequestDetails() {
-        const eventData = this.getEventData();
-        const repoFullName = eventData.repository.full_name;
-        if (!eventData.pull_request) {
-            throw new Error("No pull request data found in event");
-        }
-        const [owner, repo] = repoFullName.split("/");
-        return {
-            owner,
-            repo,
-            pullNumber: eventData.pull_request.number,
-            title: eventData.pull_request.title,
-            description: eventData.pull_request.body || "",
-        };
-    }
-    getEventData() {
-        const eventPath = process.env.GITHUB_EVENT_PATH;
-        if (!eventPath) {
-            throw new Error("GITHUB_EVENT_PATH environment variable is not set");
-        }
-        const eventData = JSON.parse(node_fs_1.default.readFileSync(eventPath, "utf8"));
-        return eventData;
-    }
-    async getPullRequestDiff(owner, repo, pullNumber) {
-        try {
-            logger_1.logger.processing(`Fetching diff for ${owner}/${repo} PR#${pullNumber}`);
-            const response = await this.octokit.pulls.get({
-                owner,
-                repo,
-                pull_number: pullNumber,
-                mediaType: {
-                    format: "diff",
-                },
-            });
-            const diff = response.data;
-            logger_1.logger.debug(`Retrieved diff length: ${diff.length}`);
-            return diff;
-        }
-        catch (error) {
-            logger_1.logger.error("Failed to get pull request diff:");
-            console.error(error);
-            return "";
-        }
-    }
-    parseDiff(diffStr) {
-        const parsedFiles = (0, diff_parser_1.default)(diffStr);
-        return this.convertParsedFilesToFileData(parsedFiles);
-    }
-    convertParsedFilesToFileData(parsedFiles) {
-        return parsedFiles.map((parsedFile) => {
-            const fileData = {
-                path: parsedFile.to === "/dev/null" ? parsedFile.from : parsedFile.to,
-                hunks: parsedFile.chunks.map((chunk) => this.convertChunkToHunkData(chunk)),
-            };
-            return fileData;
-        });
-    }
-    convertChunkToHunkData(chunk) {
-        return {
-            header: chunk.content,
-            lines: chunk.changes.map((change) => this.convertChangeToLine(change)),
-        };
-    }
-    convertChangeToLine(change) {
-        switch (change.type) {
-            case "add":
-                return `+${change.content}`;
-            case "del":
-                return `-${change.content}`;
-            case "normal":
-                return ` ${change.content}`;
-            default:
-                return change.content;
-        }
-    }
-    filterFilesByExcludePatterns(files) {
-        if (this.excludePatterns.length === 0) {
-            return files;
-        }
-        return files.filter((file) => {
-            const shouldExclude = this.excludePatterns.some((pattern) => (0, helpers_1.matchesPattern)(file.path, pattern));
-            if (shouldExclude) {
-                logger_1.logger.debug(`Excluding file: ${file.path}`);
-                return false;
-            }
-            return true;
-        });
-    }
-    async analyzeCodeChanges(files, prDetails) {
-        logger_1.logger.processing(`Starting analysis of ${files.length} files`);
-        // Process each hunk individually but with rate limiting
-        const allComments = [];
-        let hunkCount = 0;
-        let totalHunks = 0;
-        // Count total hunks for progress tracking
-        for (const file of files) {
-            if (file.path && file.path !== "/dev/null") {
-                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
-            }
-        }
-        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
-        for (const file of files) {
-            logger_1.logger.info(`Processing file: ${file.path}`);
-            if (!file.path || file.path === "/dev/null") {
-                continue;
-            }
-            for (const hunk of file.hunks) {
-                if (hunk.lines.length === 0) {
-                    continue;
-                }
-                hunkCount++;
-                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
-                const comments = await this.analyzeHunk(file.path, hunk, prDetails);
-                allComments.push(...comments);
-            }
-        }
-        logger_1.logger.success(`Generated ${allComments.length} review comments`);
-        return allComments;
-    }
-    async analyzeHunk(filePath, hunk, prDetails) {
-        const prompt = this.createReviewPrompt(filePath, hunk, prDetails);
-        const aiResponses = await this.getAiResponse(prompt);
-        if (aiResponses.length > 0) {
-            return this.createCommentsFromAiResponses(filePath, hunk, aiResponses);
-        }
-        return [];
-    }
-    loadPromptTemplate() {
-        if (this.promptTemplate !== null) {
-            return this.promptTemplate;
-        }
-        try {
-            const promptPath = node_path_1.default.join(__dirname, "config/prompt.txt");
-            this.promptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
-            return this.promptTemplate;
-        }
-        catch (error) {
-            logger_1.logger.error("Error loading prompt template:");
-            console.error(error);
-            throw new Error("Failed to load prompt template file");
-        }
-    }
-    createReviewPrompt(filePath, hunk, prDetails) {
-        const template = this.loadPromptTemplate();
-        // Simply join the hunk lines as they contain the diff markers (+, -, space)
-        const hunkContent = hunk.lines.join("\n");
-        const variables = {
-            filePath,
-            title: prDetails.title,
-            description: prDetails.description || "No description provided",
-            hunkContent,
-        };
-        return (0, helpers_1.interpolate)(template, variables);
-    }
-    async getAiResponse(prompt, retryCount = 0) {
-        const maxRetries = 3;
-        try {
-            // Rate limiting: ensure we don't exceed API limits
-            await this.enforceRateLimit();
-            const generationConfig = {
-                maxOutputTokens: 8192,
-                temperature: 0.8,
-                topP: 0.95,
-            };
-            logger_1.logger.processing(`Sending prompt to Gemini AI... (attempt ${retryCount + 1})`);
-            const result = await this.genAi.models.generateContent({
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                model: this.currentModelName,
-                config: generationConfig,
-            });
-            let responseText = result.text?.trim();
-            if (!responseText) {
-                logger_1.logger.warn("No response text received from AI");
-                return [];
-            }
-            // Clean up response text
-            if (responseText.startsWith("```json")) {
-                responseText = responseText.slice(7);
-            }
-            if (responseText.endsWith("```")) {
-                responseText = responseText.slice(0, -3);
-            }
-            responseText = responseText.trim();
-            logger_1.logger.debug(`AI response received: ${responseText.substring(0, 100)}...`);
-            const data = JSON.parse(responseText);
-            if (data.reviews && Array.isArray(data.reviews)) {
-                return data.reviews.filter((review) => review.lineContent && review.reviewComment);
-            }
-            logger_1.logger.warn("Invalid response format from AI");
-            return [];
-        }
-        catch (error) {
-            logger_1.logger.error(`Error calling Gemini AI (attempt ${retryCount + 1}):`, error);
-            // Check if it's a rate limit error and retry with exponential backoff or deranking
-            if (error &&
-                typeof error === "object" &&
-                "status" in error &&
-                error.status === 429) {
-                if (retryCount < maxRetries) {
-                    // Try deranking to a lower model first
-                    if (retryCount === 0 && this.derankModel()) {
-                        logger_1.logger.info(`Retrying with deranked model: ${this.currentModelName}`);
-                        return this.getAiResponse(prompt, retryCount + 1);
-                    }
-                    // Fall back to exponential backoff if deranking not possible or already tried
-                    const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000); // Max 30s
-                    logger_1.logger.warn(`Rate limit exceeded. Retrying in ${backoffDelay}ms... (${retryCount + 1}/${maxRetries})`);
-                    await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-                    return this.getAiResponse(prompt, retryCount + 1);
-                }
-                else {
-                    logger_1.logger.error("Max retries exceeded. Skipping this request.");
-                }
-            }
-            return [];
-        }
-    }
-    async enforceRateLimit() {
-        const now = Date.now();
-        const timeSinceLastRequest = now - this.lastRequestTime;
-        if (timeSinceLastRequest < this.rateLimitDelay) {
-            const waitTime = this.rateLimitDelay - timeSinceLastRequest;
-            logger_1.logger.debug(`Rate limiting: waiting ${waitTime}ms before next request`);
-            for (let remaining = waitTime; remaining > 0; remaining -= 1000) {
-                await new Promise((resolve) => setTimeout(resolve, Math.min(1000, remaining)));
-                if (remaining > 1000)
-                    logger_1.logger.debug(`Rate limiting: ${remaining - 1000}ms remaining`);
-            }
-        }
-        this.lastRequestTime = Date.now();
-    }
-    createCommentsFromAiResponses(filePath, hunk, aiResponses) {
-        logger_1.logger.processing(`Creating comments for ${aiResponses.length} AI responses`);
-        const comments = [];
-        for (const aiResponse of aiResponses) {
-            try {
-                const { lineContent, reviewComment } = aiResponse;
-                // The line content from the AI must be a non-empty string and start with '+'
-                if (!lineContent || !lineContent.trim().startsWith("+")) {
-                    logger_1.logger.warn(`AI response provided invalid or non-added lineContent, skipping: "${lineContent}"`);
-                    continue;
-                }
-                const normalizedAiLine = lineContent.trim().replace(/\s+/g, " ");
-                const position = hunk.lines.findIndex((hunkLine) => {
-                    // Normalize the hunk line in the exact same way before comparing
-                    const normalizedHunkLine = hunkLine.trim().replace(/\s+/g, " ");
-                    return normalizedHunkLine === normalizedAiLine;
-                }) + 1;
-                // If we couldn't find the line in the hunk, the AI hallucinated. Skip it.
-                if (position === 0) {
-                    logger_1.logger.warn(`AI provided lineContent that was not found in the hunk, skipping.
-          - AI Line (Normalized): "${normalizedAiLine}"
-          - Original AI Line: "${lineContent}"`);
-                    continue;
-                }
-                const comment = {
-                    body: reviewComment,
-                    path: filePath,
-                    position: position, // Use our calculated, trusted position
-                };
-                comments.push(comment);
-                logger_1.logger.debug(`Created comment for position ${position}: ${reviewComment.substring(0, 100)}...`);
-            }
-            catch (error) {
-                logger_1.logger.error("Error creating comment from AI response:");
-                console.error(error, aiResponse);
-            }
-        }
-        return comments;
-    }
-    async createReviewComments(owner, repo, pullNumber, comments) {
-        try {
-            logger_1.logger.processing(`Creating review with ${comments.length} comments`);
-            await this.octokit.pulls.createReview({
-                owner,
-                repo,
-                pull_number: pullNumber,
-                body: `${package_json_1.default.name} comments`,
-                comments: comments.map((comment) => ({
-                    path: comment.path,
-                    position: comment.position,
-                    body: comment.body,
-                })),
-                event: "COMMENT",
-            });
-            logger_1.logger.success("Review created successfully");
-        }
-        catch (error) {
-            logger_1.logger.error("Error creating review:");
-            console.error(error);
-            throw error;
-        }
-    }
-}
-exports.CodeReviewService = CodeReviewService;
-async function main() {
-    try {
-        const githubToken = process.env.GITHUB_TOKEN;
-        const geminiApiKey = process.env.GEMINI_API_KEY;
-        const excludeInput = process.env.INPUT_EXCLUDE || "";
-        if (!githubToken) {
-            throw new Error("GITHUB_TOKEN environment variable is required");
-        }
-        if (!geminiApiKey) {
-            throw new Error("GEMINI_API_KEY environment variable is required");
-        }
-        const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
-        logger_1.logger.verbose(`🚀 Starting Code Review with exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns);
-        await codeReviewService.processCodeReview();
-        logger_1.logger.success("✨ Code Review completed successfully!");
-    }
-    catch (error) {
-        logger_1.logger.error("💥 Error in main:", error);
-        process.exit(1);
-    }
-}
-if (require.main === require.cache[eval('__filename')]) {
-    main();
-}
-
-
-/***/ }),
-
 /***/ 3855:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -25759,15 +25333,455 @@ exports["default"] = parseDiff;
 
 /***/ }),
 
-/***/ 4482:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ 2004:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.AIService = void 0;
+const node_fs_1 = __importDefault(__nccwpck_require__(3024));
+const node_path_1 = __importDefault(__nccwpck_require__(6760));
+const genai_1 = __nccwpck_require__(7002);
+const logger_1 = __nccwpck_require__(187);
+const helpers_1 = __nccwpck_require__(4482);
+class AIService {
+    genAi;
+    currentModelName;
+    rpmLimits;
+    modelHierarchy;
+    promptTemplate = null;
+    batchPromptTemplate = null;
+    lastRequestTime = 0;
+    rateLimitDelay = 0;
+    constructor(geminiApiKey) {
+        this.genAi = new genai_1.GoogleGenAI({ apiKey: geminiApiKey });
+        this.currentModelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-lite";
+        this.rpmLimits = {
+            "gemini-2.5-pro": 5,
+            "gemini-2.5-flash": 10,
+            "gemini-2.5-flash-lite": 15,
+            "gemini-2.0-flash": 15,
+            "gemini-2.0-flash-lite": 30,
+        };
+        this.modelHierarchy = Object.keys(this.rpmLimits).sort((a, b) => this.rpmLimits[b] - this.rpmLimits[a]);
+        this.updateRateLimitDelay();
+        logger_1.logger.info(`AI Service initialized with model: ${this.currentModelName} (${this.rpmLimits[this.currentModelName] || 5} RPM, ${this.rateLimitDelay}ms delay)`);
+    }
+    updateRateLimitDelay() {
+        const rpm = this.rpmLimits[this.currentModelName] || 5;
+        this.rateLimitDelay = Math.ceil(60000 / rpm);
+    }
+    getNextLowerModel() {
+        const currentIndex = this.modelHierarchy.indexOf(this.currentModelName);
+        if (currentIndex === -1 ||
+            currentIndex === this.modelHierarchy.length - 1) {
+            return null;
+        }
+        return this.modelHierarchy[currentIndex + 1];
+    }
+    derankModel() {
+        const nextModel = this.getNextLowerModel();
+        if (!nextModel) {
+            logger_1.logger.warn(`Already using the lowest model (${this.currentModelName}), cannot derank further`);
+            return false;
+        }
+        const oldModel = this.currentModelName;
+        this.currentModelName = nextModel;
+        this.updateRateLimitDelay();
+        logger_1.logger.warn(`Deranked from ${oldModel} to ${this.currentModelName} due to rate limits`);
+        logger_1.logger.info(`New rate limit: ${this.rpmLimits[this.currentModelName]} RPM (${this.rateLimitDelay}ms delay)`);
+        return true;
+    }
+    loadPromptTemplate() {
+        if (this.promptTemplate !== null) {
+            return this.promptTemplate;
+        }
+        try {
+            const promptPath = node_path_1.default.join(__dirname, "../config/prompt.txt");
+            this.promptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
+            return this.promptTemplate;
+        }
+        catch (error) {
+            logger_1.logger.error("Error loading prompt template:", error);
+            throw new Error("Failed to load prompt template file");
+        }
+    }
+    loadBatchPromptTemplate() {
+        if (this.batchPromptTemplate !== null) {
+            return this.batchPromptTemplate;
+        }
+        try {
+            const promptPath = node_path_1.default.join(__dirname, "../config/batch-prompt.txt");
+            this.batchPromptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
+            return this.batchPromptTemplate;
+        }
+        catch (error) {
+            logger_1.logger.warn("Batch prompt template not found, falling back to single prompt");
+            return this.loadPromptTemplate();
+        }
+    }
+    async enforceRateLimit() {
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastRequestTime;
+        if (timeSinceLastRequest < this.rateLimitDelay) {
+            const waitTime = this.rateLimitDelay - timeSinceLastRequest;
+            logger_1.logger.debug(`Rate limiting: waiting ${waitTime}ms before next request`);
+            for (let remaining = waitTime; remaining > 0; remaining -= 1000) {
+                await new Promise((resolve) => setTimeout(resolve, Math.min(1000, remaining)));
+                if (remaining > 1000)
+                    logger_1.logger.debug(`Rate limiting: ${remaining - 1000}ms remaining`);
+            }
+        }
+        this.lastRequestTime = Date.now();
+    }
+    async reviewBatch(batch, prDetails) {
+        const prompt = this.createBatchReviewPrompt(batch, prDetails);
+        const aiResponses = await this.getAiResponse(prompt, true);
+        return aiResponses;
+    }
+    async reviewSingle(filePath, hunkContent, prDetails) {
+        const prompt = this.createSingleReviewPrompt(filePath, hunkContent, prDetails);
+        const aiResponses = await this.getAiResponse(prompt, false);
+        return aiResponses;
+    }
+    createBatchReviewPrompt(batch, prDetails) {
+        const template = this.loadBatchPromptTemplate();
+        const filesContent = batch.files
+            .map((file, index) => `File ${index + 1}: ${file.path}\n\`\`\`diff\n${file.content}\n\`\`\``)
+            .join("\n\n");
+        const variables = {
+            title: prDetails.title,
+            description: prDetails.description || "No description provided",
+            filesContent,
+            fileCount: batch.files.length,
+        };
+        return (0, helpers_1.interpolate)(template, variables);
+    }
+    createSingleReviewPrompt(filePath, hunkContent, prDetails) {
+        const template = this.loadPromptTemplate();
+        const variables = {
+            filePath,
+            title: prDetails.title,
+            description: prDetails.description || "No description provided",
+            hunkContent,
+        };
+        return (0, helpers_1.interpolate)(template, variables);
+    }
+    async getAiResponse(prompt, isBatch, retryCount = 0) {
+        const maxRetries = 3;
+        try {
+            await this.enforceRateLimit();
+            const generationConfig = {
+                maxOutputTokens: isBatch ? 16384 : 8192, // Increase token limit for batch requests
+                temperature: 0.8,
+                topP: 0.95,
+            };
+            logger_1.logger.processing(`Sending ${isBatch ? "batch" : "single"} prompt to Gemini AI... (attempt ${retryCount + 1})`);
+            const result = await this.genAi.models.generateContent({
+                contents: [{ role: "user", parts: [{ text: prompt }] }],
+                model: this.currentModelName,
+                config: generationConfig,
+            });
+            let responseText = result.text?.trim();
+            if (!responseText) {
+                logger_1.logger.warn("No response text received from AI");
+                return [];
+            }
+            // Clean up response text
+            if (responseText.startsWith("```json")) {
+                responseText = responseText.slice(7);
+            }
+            if (responseText.endsWith("```")) {
+                responseText = responseText.slice(0, -3);
+            }
+            responseText = responseText.trim();
+            logger_1.logger.debug(`AI response received: ${responseText.substring(0, 100)}...`);
+            const data = JSON.parse(responseText);
+            if (data.reviews && Array.isArray(data.reviews)) {
+                return data.reviews.filter((review) => review.lineContent && review.reviewComment);
+            }
+            logger_1.logger.warn("Invalid response format from AI");
+            return [];
+        }
+        catch (error) {
+            logger_1.logger.error(`Error calling Gemini AI (attempt ${retryCount + 1}):`, error);
+            // Check if it's a rate limit error and retry with exponential backoff or deranking
+            if (error &&
+                typeof error === "object" &&
+                "status" in error &&
+                error.status === 429) {
+                if (retryCount < maxRetries) {
+                    // Try deranking to a lower model first
+                    if (retryCount === 0 && this.derankModel()) {
+                        logger_1.logger.info(`Retrying with deranked model: ${this.currentModelName}`);
+                        return this.getAiResponse(prompt, isBatch, retryCount + 1);
+                    }
+                    // Fall back to exponential backoff if deranking not possible or already tried
+                    const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+                    logger_1.logger.warn(`Rate limit exceeded. Retrying in ${backoffDelay}ms... (${retryCount + 1}/${maxRetries})`);
+                    await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+                    return this.getAiResponse(prompt, isBatch, retryCount + 1);
+                }
+                else {
+                    logger_1.logger.error("Max retries exceeded. Skipping this request.");
+                }
+            }
+            return [];
+        }
+    }
+}
+exports.AIService = AIService;
+
+
+/***/ }),
+
+/***/ 7951:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.BatchProcessor = void 0;
+const logger_1 = __nccwpck_require__(187);
+class BatchProcessor {
+    maxBatchSize;
+    maxTokensPerBatch;
+    constructor(maxBatchSize = 10, maxTokensPerBatch = 12000) {
+        this.maxBatchSize = maxBatchSize;
+        this.maxTokensPerBatch = maxTokensPerBatch;
+    }
+    createBatches(files) {
+        const batches = [];
+        let currentBatch = [];
+        let currentTokenCount = 0;
+        logger_1.logger.processing(`Creating batches from ${files.length} files`);
+        for (const file of files) {
+            if (!file.path || file.path === "/dev/null") {
+                continue;
+            }
+            // Combine all hunks for this file
+            const fileContent = this.combineHunksToContent(file.hunks);
+            const estimatedTokens = this.estimateTokens(fileContent);
+            // Check if adding this file would exceed limits
+            const wouldExceedTokens = currentTokenCount + estimatedTokens > this.maxTokensPerBatch;
+            const wouldExceedSize = currentBatch.length >= this.maxBatchSize;
+            if ((wouldExceedTokens || wouldExceedSize) && currentBatch.length > 0) {
+                // Create a batch with current files
+                batches.push({
+                    files: [...currentBatch],
+                    totalEstimatedTokens: currentTokenCount,
+                });
+                // Start new batch
+                currentBatch = [];
+                currentTokenCount = 0;
+            }
+            // Add current file to batch
+            currentBatch.push({
+                path: file.path,
+                content: fileContent,
+                estimatedTokens,
+                originalHunks: file.hunks,
+            });
+            currentTokenCount += estimatedTokens;
+        }
+        // Add remaining files as the last batch
+        if (currentBatch.length > 0) {
+            batches.push({
+                files: [...currentBatch],
+                totalEstimatedTokens: currentTokenCount,
+            });
+        }
+        logger_1.logger.info(`Created ${batches.length} batches from ${files.length} files`);
+        batches.forEach((batch, index) => {
+            logger_1.logger.debug(`Batch ${index + 1}: ${batch.files.length} files, ~${batch.totalEstimatedTokens} tokens`);
+        });
+        return batches;
+    }
+    combineHunksToContent(hunks) {
+        return hunks
+            .filter((hunk) => hunk.lines.length > 0)
+            .map((hunk) => hunk.lines.join("\n"))
+            .join("\n\n");
+    }
+    estimateTokens(content) {
+        // Rough estimation: 1 token ≈ 4 characters
+        // This is a conservative estimate for code content
+        return Math.ceil(content.length / 3.5);
+    }
+    createCommentsFromBatchResponse(batch, aiResponses) {
+        logger_1.logger.processing(`Creating comments from batch response with ${aiResponses.length} AI responses`);
+        const comments = [];
+        for (const aiResponse of aiResponses) {
+            try {
+                const { lineContent, reviewComment } = aiResponse;
+                // The line content from the AI must be a non-empty string and start with '+'
+                if (!lineContent || !lineContent.trim().startsWith("+")) {
+                    logger_1.logger.warn(`AI response provided invalid or non-added lineContent, skipping: "${lineContent}"`);
+                    continue;
+                }
+                // Find which file and position this comment belongs to
+                const matchResult = this.findFileAndPosition(batch, lineContent);
+                if (!matchResult) {
+                    logger_1.logger.warn(`AI provided lineContent that was not found in any batch file, skipping: "${lineContent}"`);
+                    continue;
+                }
+                const comment = {
+                    body: reviewComment,
+                    path: matchResult.filePath,
+                    position: matchResult.position,
+                };
+                comments.push(comment);
+                logger_1.logger.debug(`Created comment for ${matchResult.filePath}:${matchResult.position}: ${reviewComment.substring(0, 100)}...`);
+            }
+            catch (error) {
+                logger_1.logger.error("Error creating comment from batch AI response:");
+                console.error(error, aiResponse);
+            }
+        }
+        return comments;
+    }
+    findFileAndPosition(batch, lineContent) {
+        const normalizedAiLine = lineContent.trim().replace(/\s+/g, " ");
+        for (const file of batch.files) {
+            // Search through the original hunks for this file
+            for (const hunk of file.originalHunks) {
+                const position = hunk.lines.findIndex((hunkLine) => {
+                    const normalizedHunkLine = hunkLine.trim().replace(/\s+/g, " ");
+                    return normalizedHunkLine === normalizedAiLine;
+                }) + 1;
+                if (position > 0) {
+                    return {
+                        filePath: file.path,
+                        position,
+                    };
+                }
+            }
+        }
+        return null;
+    }
+    shouldUseBatching(files) {
+        // Use batching if we have more than 3 files or if total content is substantial
+        if (files.length <= 2) {
+            return false;
+        }
+        const totalHunks = files.reduce((total, file) => total + file.hunks.length, 0);
+        return totalHunks > 5; // Use batching for more than 5 hunks total
+    }
+}
+exports.BatchProcessor = BatchProcessor;
+
+
+/***/ }),
+
+/***/ 8221:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubService = void 0;
+const node_fs_1 = __importDefault(__nccwpck_require__(3024));
+const rest_1 = __nccwpck_require__(2875);
+const logger_1 = __nccwpck_require__(187);
+const package_json_1 = __importDefault(__nccwpck_require__(8330));
+class GitHubService {
+    octokit;
+    constructor(githubToken) {
+        this.octokit = new rest_1.Octokit({ auth: githubToken });
+    }
+    getPullRequestDetails() {
+        const eventData = this.getEventData();
+        const repoFullName = eventData.repository.full_name;
+        if (!eventData.pull_request) {
+            throw new Error("No pull request data found in event");
+        }
+        const [owner, repo] = repoFullName.split("/");
+        return {
+            owner,
+            repo,
+            pullNumber: eventData.pull_request.number,
+            title: eventData.pull_request.title,
+            description: eventData.pull_request.body || "",
+        };
+    }
+    getEventData() {
+        const eventPath = process.env.GITHUB_EVENT_PATH;
+        if (!eventPath) {
+            throw new Error("GITHUB_EVENT_PATH environment variable is not set");
+        }
+        const eventData = JSON.parse(node_fs_1.default.readFileSync(eventPath, "utf8"));
+        return eventData;
+    }
+    async getPullRequestDiff(owner, repo, pullNumber) {
+        try {
+            logger_1.logger.processing(`Fetching diff for ${owner}/${repo} PR#${pullNumber}`);
+            const response = await this.octokit.pulls.get({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                mediaType: {
+                    format: "diff",
+                },
+            });
+            const diff = response.data;
+            logger_1.logger.debug(`Retrieved diff length: ${diff.length}`);
+            return diff;
+        }
+        catch (error) {
+            logger_1.logger.error("Failed to get pull request diff:", error);
+            return "";
+        }
+    }
+    async createReviewComments(owner, repo, pullNumber, comments) {
+        try {
+            logger_1.logger.processing(`Creating review with ${comments.length} comments`);
+            await this.octokit.pulls.createReview({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                body: `${package_json_1.default.name} comments`,
+                comments: comments.map((comment) => ({
+                    path: comment.path,
+                    position: comment.position,
+                    body: comment.body,
+                })),
+                event: "COMMENT",
+            });
+            logger_1.logger.success("Review created successfully");
+        }
+        catch (error) {
+            logger_1.logger.error("Error creating review:", error);
+            throw error;
+        }
+    }
+}
+exports.GitHubService = GitHubService;
+
+
+/***/ }),
+
+/***/ 4482:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.matchesPattern = matchesPattern;
 exports.parseExcludePatterns = parseExcludePatterns;
 exports.interpolate = interpolate;
+exports.parseDiffToFileData = parseDiffToFileData;
+exports.createCommentsFromAiResponses = createCommentsFromAiResponses;
+const diff_parser_1 = __importDefault(__nccwpck_require__(3855));
 function createPatternRegex(pattern) {
     const escapedPattern = pattern
         .replace(/\./g, "\\.")
@@ -25790,8 +25804,71 @@ function parseExcludePatterns(excludeInput) {
 }
 function interpolate(template, variables) {
     return template.replace(/\{(\w+)\}/g, (match, key) => {
-        return variables[key] !== undefined ? variables[key] : match;
+        return variables[key] !== undefined ? String(variables[key]) : match;
     });
+}
+function parseDiffToFileData(diffStr) {
+    const parsedFiles = (0, diff_parser_1.default)(diffStr);
+    return convertParsedFilesToFileData(parsedFiles);
+}
+function convertParsedFilesToFileData(parsedFiles) {
+    return parsedFiles.map((parsedFile) => {
+        const fileData = {
+            path: parsedFile.to === "/dev/null" ? parsedFile.from : parsedFile.to,
+            hunks: parsedFile.chunks.map((chunk) => convertChunkToHunkData(chunk)),
+        };
+        return fileData;
+    });
+}
+function convertChunkToHunkData(chunk) {
+    return {
+        header: chunk.content,
+        lines: chunk.changes.map((change) => convertChangeToLine(change)),
+    };
+}
+function convertChangeToLine(change) {
+    switch (change.type) {
+        case "add":
+            return `+${change.content}`;
+        case "del":
+            return `-${change.content}`;
+        case "normal":
+            return ` ${change.content}`;
+        default:
+            return change.content;
+    }
+}
+function createCommentsFromAiResponses(filePath, hunk, aiResponses) {
+    const comments = [];
+    for (const aiResponse of aiResponses) {
+        try {
+            const { lineContent, reviewComment } = aiResponse;
+            // The line content from the AI must be a non-empty string and start with '+'
+            if (!lineContent || !lineContent.trim().startsWith("+")) {
+                continue;
+            }
+            const normalizedAiLine = lineContent.trim().replace(/\s+/g, " ");
+            const position = hunk.lines.findIndex((hunkLine) => {
+                // Normalize the hunk line in the exact same way before comparing
+                const normalizedHunkLine = hunkLine.trim().replace(/\s+/g, " ");
+                return normalizedHunkLine === normalizedAiLine;
+            }) + 1;
+            // If we couldn't find the line in the hunk, the AI hallucinated. Skip it.
+            if (position === 0) {
+                continue;
+            }
+            const comment = {
+                body: reviewComment,
+                path: filePath,
+                position: position, // Use our calculated, trusted position
+            };
+            comments.push(comment);
+        }
+        catch (error) {
+            console.error("Error creating comment from AI response:", error, aiResponse);
+        }
+    }
+    return comments;
 }
 
 
@@ -48805,7 +48882,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && mkdir -p dist/config && cp src/config/prompt.txt dist/config/prompt.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && mkdir -p build/config && cp src/config/prompt.txt build/config/prompt.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 
@@ -48875,13 +48952,180 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","v
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
 /******/ 	
 /************************************************************************/
-/******/ 	
-/******/ 	// startup
-/******/ 	// Load entry module and return exports
-/******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(6549);
-/******/ 	module.exports = __webpack_exports__;
-/******/ 	
+var __webpack_exports__ = {};
+// This entry need to be wrapped in an IIFE because it need to be in strict mode.
+(() => {
+"use strict";
+var exports = __webpack_exports__;
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.CodeReviewService = void 0;
+const ai_service_1 = __nccwpck_require__(2004);
+const github_service_1 = __nccwpck_require__(8221);
+const batch_processor_1 = __nccwpck_require__(7951);
+const logger_1 = __nccwpck_require__(187);
+const helpers_1 = __nccwpck_require__(4482);
+class CodeReviewService {
+    githubService;
+    aiService;
+    batchProcessor;
+    excludePatterns;
+    constructor(githubToken, geminiApiKey, excludePatterns = []) {
+        this.githubService = new github_service_1.GitHubService(githubToken);
+        this.aiService = new ai_service_1.AIService(geminiApiKey);
+        this.batchProcessor = new batch_processor_1.BatchProcessor();
+        this.excludePatterns = excludePatterns;
+    }
+    async processCodeReview() {
+        try {
+            const prDetails = this.githubService.getPullRequestDetails();
+            const eventName = process.env.GITHUB_EVENT_NAME;
+            if (eventName !== "pull_request") {
+                logger_1.logger.warn(`Unsupported event: ${eventName}`);
+                return;
+            }
+            const diff = await this.githubService.getPullRequestDiff(prDetails.owner, prDetails.repo, prDetails.pullNumber);
+            if (!diff) {
+                logger_1.logger.warn("No diff found for this pull request");
+                return;
+            }
+            const parsedDiff = (0, helpers_1.parseDiffToFileData)(diff);
+            const filteredDiff = this.filterFilesByExcludePatterns(parsedDiff);
+            logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
+                .map((f) => f.path)
+                .join(", ")}`);
+            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails);
+            if (comments.length > 0) {
+                await this.githubService.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
+                logger_1.logger.success(`Created ${comments.length} review comments`);
+            }
+            else {
+                logger_1.logger.info("No review comments generated");
+            }
+        }
+        catch (error) {
+            logger_1.logger.error("Error in code review process:", error);
+            throw error;
+        }
+    }
+    filterFilesByExcludePatterns(files) {
+        if (this.excludePatterns.length === 0) {
+            return files;
+        }
+        return files.filter((file) => {
+            const shouldExclude = this.excludePatterns.some((pattern) => (0, helpers_1.matchesPattern)(file.path, pattern));
+            if (shouldExclude) {
+                logger_1.logger.debug(`Excluding file: ${file.path}`);
+                return false;
+            }
+            return true;
+        });
+    }
+    async analyzeCodeChanges(files, prDetails) {
+        logger_1.logger.processing(`Starting analysis of ${files.length} files`);
+        // Decide whether to use batch processing or individual file processing
+        if (this.batchProcessor.shouldUseBatching(files)) {
+            return this.analyzeBatchMode(files, prDetails);
+        }
+        else {
+            return this.analyzeIndividualMode(files, prDetails);
+        }
+    }
+    async analyzeBatchMode(files, prDetails) {
+        logger_1.logger.info("Using batch processing mode for performance optimization");
+        const batches = this.batchProcessor.createBatches(files);
+        const allComments = [];
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            logger_1.logger.processing(`Processing batch ${i + 1}/${batches.length} (${batch.files.length} files)`);
+            try {
+                const aiResponses = await this.aiService.reviewBatch(batch, prDetails);
+                const comments = this.batchProcessor.createCommentsFromBatchResponse(batch, aiResponses);
+                allComments.push(...comments);
+                logger_1.logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
+            }
+            catch (error) {
+                logger_1.logger.error(`Error processing batch ${i + 1}:`, error);
+                // Fallback: try individual file processing for this batch
+                logger_1.logger.info(`Falling back to individual processing for batch ${i + 1}`);
+                const fallbackComments = await this.processBatchFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails);
+                allComments.push(...fallbackComments);
+            }
+        }
+        logger_1.logger.success(`Batch processing generated ${allComments.length} total comments`);
+        return allComments;
+    }
+    async analyzeIndividualMode(files, prDetails) {
+        logger_1.logger.info("Using individual file processing mode");
+        return this.processBatchFilesIndividually(files, prDetails);
+    }
+    async processBatchFilesIndividually(files, prDetails) {
+        const allComments = [];
+        let hunkCount = 0;
+        let totalHunks = 0;
+        // Count total hunks for progress tracking
+        for (const file of files) {
+            if (file.path && file.path !== "/dev/null") {
+                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
+            }
+        }
+        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
+        for (const file of files) {
+            logger_1.logger.info(`Processing file: ${file.path}`);
+            if (!file.path || file.path === "/dev/null") {
+                continue;
+            }
+            for (const hunk of file.hunks) {
+                if (hunk.lines.length === 0) {
+                    continue;
+                }
+                hunkCount++;
+                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
+                try {
+                    const hunkContent = hunk.lines.join("\n");
+                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails);
+                    const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
+                    allComments.push(...comments);
+                }
+                catch (error) {
+                    logger_1.logger.error(`Error processing hunk ${hunkCount}:`, error);
+                }
+            }
+        }
+        logger_1.logger.success(`Individual processing generated ${allComments.length} comments`);
+        return allComments;
+    }
+}
+exports.CodeReviewService = CodeReviewService;
+async function main() {
+    try {
+        const githubToken = process.env.GITHUB_TOKEN;
+        const geminiApiKey = process.env.GEMINI_API_KEY;
+        const excludeInput = process.env.INPUT_EXCLUDE || "";
+        if (!githubToken) {
+            throw new Error("GITHUB_TOKEN environment variable is required");
+        }
+        if (!geminiApiKey) {
+            throw new Error("GEMINI_API_KEY environment variable is required");
+        }
+        const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
+        logger_1.logger.verbose(`🚀 Starting Code Review with exclude patterns: ${excludePatterns.join(", ")}`);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns);
+        await codeReviewService.processCodeReview();
+        logger_1.logger.success("✨ Code Review completed successfully!");
+    }
+    catch (error) {
+        logger_1.logger.error("💥 Error in main:", error);
+        process.exit(1);
+    }
+}
+if (require.main === require.cache[eval('__filename')]) {
+    main();
+}
+
+})();
+
+module.exports = __webpack_exports__;
 /******/ })()
 ;
 //# sourceMappingURL=index.js.map
