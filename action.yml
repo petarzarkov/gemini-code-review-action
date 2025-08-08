@@ -1,0 +1,17 @@
+name: "Gemini AI Code Review Action"
+description: "Uses Google Gemini to perform an AI-powered code review on pull requests."
+author: "Petar Zarkov"
+
+inputs:
+  exclude:
+    description: "Comma-separated list of file patterns to exclude from the review (e.g., *.md, dist/*, package-lock.json)."
+    required: false
+    default: "*.md,*.json,package-lock.json,*.yaml,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
+
+branding:
+  icon: "git-pull-request"
+  color: "blue"

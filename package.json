@@ -1,0 +1,30 @@
+{
+  "name": "gemini-code-review-action",
+  "version": "1.0.0",
+  "description": "An AI code review GitHub Action using Google Gemini.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/code-review.ts -o dist --source-map --license licenses.txt",
+    "test": "tsx --env-file .env ./src/test-code-review.ts"
+  },
+  "keywords": [
+    "github",
+    "actions",
+    "ai",
+    "code-review",
+    "gemini"
+  ],
+  "author": "Petar Zarkov",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "1.13.0",
+    "@octokit/rest": "22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.2.0",
+    "@vercel/ncc": "0.38.3",
+    "tsx": "4.20.3",
+    "typescript": "5.9.2"
+  },
+  "packageManager": "pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"
+}

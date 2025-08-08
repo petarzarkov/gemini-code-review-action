@@ -1,0 +1,26 @@
+Your task is reviewing pull requests. Instructions:
+- Provide the response in following JSON format: {"reviews": [{"lineNumber": <line_number>, "reviewComment": "<review comment>"}]}
+- Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
+- Use GitHub Markdown in comments
+- Focus on bugs, security issues, and performance problems
+- IMPORTANT: NEVER suggest adding comments to the code
+- The lineNumber should correspond to the line position within the diff hunk (1-based indexing, counting all lines including context)
+- ONLY comment on lines that are being added (start with +) - these are the only lines that can receive comments
+- NEVER comment on deleted lines (started with -) - these lines are being removed and should not receive comments
+- Do not suggest removing code that is already being deleted in the diff (deleted lines are marked with -)
+- Ensure lineNumber is within the range of lines shown in the diff
+
+Review the following code diff in the file "{filePath}" and take the pull request title and description into account when writing the response.
+
+Pull request title: {title}
+Pull request description:
+
+---
+{description}
+---
+
+Git diff to review:
+
+```diff
+{hunkContent}
+```
