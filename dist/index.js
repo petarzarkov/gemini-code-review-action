@@ -25075,6 +25075,184 @@ function socketOnError() {
 
 /***/ }),
 
+/***/ 6549:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.CodeReviewService = void 0;
+const ai_service_1 = __nccwpck_require__(2004);
+const github_service_1 = __nccwpck_require__(8221);
+const batch_processor_1 = __nccwpck_require__(7951);
+const logger_1 = __nccwpck_require__(187);
+const helpers_1 = __nccwpck_require__(4482);
+const package_json_1 = __importDefault(__nccwpck_require__(8330));
+class CodeReviewService {
+    githubService;
+    aiService;
+    batchProcessor;
+    excludePatterns;
+    constructor(githubToken, geminiApiKey, excludePatterns = [], model) {
+        this.githubService = new github_service_1.GitHubService(githubToken);
+        this.aiService = new ai_service_1.AIService(geminiApiKey, model);
+        this.batchProcessor = new batch_processor_1.BatchProcessor();
+        this.excludePatterns = excludePatterns;
+    }
+    async processCodeReview() {
+        try {
+            const prDetails = this.githubService.getPullRequestDetails();
+            const eventName = process.env.GITHUB_EVENT_NAME;
+            if (eventName !== "pull_request") {
+                logger_1.logger.warn(`Unsupported event: ${eventName}`);
+                return;
+            }
+            const diff = await this.githubService.getPullRequestDiff(prDetails.owner, prDetails.repo, prDetails.pullNumber);
+            if (!diff) {
+                logger_1.logger.warn("No diff found for this pull request");
+                return;
+            }
+            const parsedDiff = (0, helpers_1.parseDiffToFileData)(diff);
+            const filteredDiff = this.filterFilesByExcludePatterns(parsedDiff);
+            logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
+                .map((f) => f.path)
+                .join(", ")}`);
+            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails);
+            if (comments.length > 0) {
+                await this.githubService.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
+                logger_1.logger.success(`Created ${comments.length} review comments`);
+            }
+            else {
+                logger_1.logger.info("No review comments generated");
+            }
+        }
+        catch (error) {
+            logger_1.logger.error("Error in code review process:", error);
+            throw error;
+        }
+    }
+    filterFilesByExcludePatterns(files) {
+        if (this.excludePatterns.length === 0) {
+            return files;
+        }
+        return files.filter((file) => {
+            const shouldExclude = this.excludePatterns.some((pattern) => (0, helpers_1.matchesPattern)(file.path, pattern));
+            if (shouldExclude) {
+                logger_1.logger.debug(`Excluding file: ${file.path}`);
+                return false;
+            }
+            return true;
+        });
+    }
+    async analyzeCodeChanges(files, prDetails) {
+        logger_1.logger.processing(`Starting analysis of ${files.length} files`);
+        // Decide whether to use batch processing or individual file processing
+        if (this.batchProcessor.shouldUseBatching(files)) {
+            return this.analyzeBatchMode(files, prDetails);
+        }
+        else {
+            return this.analyzeIndividualMode(files, prDetails);
+        }
+    }
+    async analyzeBatchMode(files, prDetails) {
+        logger_1.logger.info("Using batch processing mode for performance optimization");
+        const batches = this.batchProcessor.createBatches(files);
+        const allComments = [];
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            logger_1.logger.processing(`Processing batch ${i + 1}/${batches.length} (${batch.files.length} files)`);
+            try {
+                const aiResponses = await this.aiService.reviewBatch(batch, prDetails);
+                const comments = this.batchProcessor.createCommentsFromBatchResponse(batch, aiResponses);
+                allComments.push(...comments);
+                logger_1.logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
+            }
+            catch (error) {
+                logger_1.logger.error(`Error processing batch ${i + 1}:`, error);
+                // Fallback: try individual file processing for this batch
+                logger_1.logger.info(`Falling back to individual processing for batch ${i + 1}`);
+                const fallbackComments = await this.processBatchFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails);
+                allComments.push(...fallbackComments);
+            }
+        }
+        logger_1.logger.success(`Batch processing generated ${allComments.length} total comments`);
+        return allComments;
+    }
+    async analyzeIndividualMode(files, prDetails) {
+        logger_1.logger.info("Using individual file processing mode");
+        return this.processBatchFilesIndividually(files, prDetails);
+    }
+    async processBatchFilesIndividually(files, prDetails) {
+        const allComments = [];
+        let hunkCount = 0;
+        let totalHunks = 0;
+        // Count total hunks for progress tracking
+        for (const file of files) {
+            if (file.path && file.path !== "/dev/null") {
+                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
+            }
+        }
+        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
+        for (const file of files) {
+            logger_1.logger.info(`Processing file: ${file.path}`);
+            if (!file.path || file.path === "/dev/null") {
+                continue;
+            }
+            for (const hunk of file.hunks) {
+                if (hunk.lines.length === 0) {
+                    continue;
+                }
+                hunkCount++;
+                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
+                try {
+                    const hunkContent = hunk.lines.join("\n");
+                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails);
+                    const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
+                    allComments.push(...comments);
+                }
+                catch (error) {
+                    logger_1.logger.error(`Error processing hunk ${hunkCount}:`, error);
+                }
+            }
+        }
+        logger_1.logger.success(`Individual processing generated ${allComments.length} comments`);
+        return allComments;
+    }
+}
+exports.CodeReviewService = CodeReviewService;
+async function main() {
+    try {
+        const githubToken = process.env.GITHUB_TOKEN;
+        const geminiApiKey = process.env.GEMINI_API_KEY;
+        const excludeInput = process.env.INPUT_EXCLUDE || "";
+        const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
+        if (!githubToken) {
+            throw new Error("GITHUB_TOKEN environment variable is required");
+        }
+        if (!geminiApiKey) {
+            throw new Error("GEMINI_API_KEY environment variable is required");
+        }
+        const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
+        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model);
+        await codeReviewService.processCodeReview();
+        logger_1.logger.success("✨ Code Review completed successfully!");
+    }
+    catch (error) {
+        logger_1.logger.error("💥 Error in main:", error);
+        process.exit(1);
+    }
+}
+if (require.main === require.cache[eval('__filename')]) {
+    main();
+}
+
+
+/***/ }),
+
 /***/ 1159:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -48932,7 +49110,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.2","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.4","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 
@@ -49002,181 +49180,13 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","v
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
 /******/ 	
 /************************************************************************/
-var __webpack_exports__ = {};
-// This entry need to be wrapped in an IIFE because it need to be in strict mode.
-(() => {
-"use strict";
-var exports = __webpack_exports__;
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.CodeReviewService = void 0;
-const ai_service_1 = __nccwpck_require__(2004);
-const github_service_1 = __nccwpck_require__(8221);
-const batch_processor_1 = __nccwpck_require__(7951);
-const logger_1 = __nccwpck_require__(187);
-const helpers_1 = __nccwpck_require__(4482);
-class CodeReviewService {
-    githubService;
-    aiService;
-    batchProcessor;
-    excludePatterns;
-    constructor(githubToken, geminiApiKey, excludePatterns = [], model) {
-        this.githubService = new github_service_1.GitHubService(githubToken);
-        this.aiService = new ai_service_1.AIService(geminiApiKey, model);
-        this.batchProcessor = new batch_processor_1.BatchProcessor();
-        this.excludePatterns = excludePatterns;
-    }
-    async processCodeReview() {
-        try {
-            const prDetails = this.githubService.getPullRequestDetails();
-            const eventName = process.env.GITHUB_EVENT_NAME;
-            if (eventName !== "pull_request") {
-                logger_1.logger.warn(`Unsupported event: ${eventName}`);
-                return;
-            }
-            const diff = await this.githubService.getPullRequestDiff(prDetails.owner, prDetails.repo, prDetails.pullNumber);
-            if (!diff) {
-                logger_1.logger.warn("No diff found for this pull request");
-                return;
-            }
-            const parsedDiff = (0, helpers_1.parseDiffToFileData)(diff);
-            const filteredDiff = this.filterFilesByExcludePatterns(parsedDiff);
-            logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
-                .map((f) => f.path)
-                .join(", ")}`);
-            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails);
-            if (comments.length > 0) {
-                await this.githubService.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
-                logger_1.logger.success(`Created ${comments.length} review comments`);
-            }
-            else {
-                logger_1.logger.info("No review comments generated");
-            }
-        }
-        catch (error) {
-            logger_1.logger.error("Error in code review process:", error);
-            throw error;
-        }
-    }
-    filterFilesByExcludePatterns(files) {
-        if (this.excludePatterns.length === 0) {
-            return files;
-        }
-        return files.filter((file) => {
-            const shouldExclude = this.excludePatterns.some((pattern) => (0, helpers_1.matchesPattern)(file.path, pattern));
-            if (shouldExclude) {
-                logger_1.logger.debug(`Excluding file: ${file.path}`);
-                return false;
-            }
-            return true;
-        });
-    }
-    async analyzeCodeChanges(files, prDetails) {
-        logger_1.logger.processing(`Starting analysis of ${files.length} files`);
-        // Decide whether to use batch processing or individual file processing
-        if (this.batchProcessor.shouldUseBatching(files)) {
-            return this.analyzeBatchMode(files, prDetails);
-        }
-        else {
-            return this.analyzeIndividualMode(files, prDetails);
-        }
-    }
-    async analyzeBatchMode(files, prDetails) {
-        logger_1.logger.info("Using batch processing mode for performance optimization");
-        const batches = this.batchProcessor.createBatches(files);
-        const allComments = [];
-        for (let i = 0; i < batches.length; i++) {
-            const batch = batches[i];
-            logger_1.logger.processing(`Processing batch ${i + 1}/${batches.length} (${batch.files.length} files)`);
-            try {
-                const aiResponses = await this.aiService.reviewBatch(batch, prDetails);
-                const comments = this.batchProcessor.createCommentsFromBatchResponse(batch, aiResponses);
-                allComments.push(...comments);
-                logger_1.logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
-            }
-            catch (error) {
-                logger_1.logger.error(`Error processing batch ${i + 1}:`, error);
-                // Fallback: try individual file processing for this batch
-                logger_1.logger.info(`Falling back to individual processing for batch ${i + 1}`);
-                const fallbackComments = await this.processBatchFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails);
-                allComments.push(...fallbackComments);
-            }
-        }
-        logger_1.logger.success(`Batch processing generated ${allComments.length} total comments`);
-        return allComments;
-    }
-    async analyzeIndividualMode(files, prDetails) {
-        logger_1.logger.info("Using individual file processing mode");
-        return this.processBatchFilesIndividually(files, prDetails);
-    }
-    async processBatchFilesIndividually(files, prDetails) {
-        const allComments = [];
-        let hunkCount = 0;
-        let totalHunks = 0;
-        // Count total hunks for progress tracking
-        for (const file of files) {
-            if (file.path && file.path !== "/dev/null") {
-                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
-            }
-        }
-        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
-        for (const file of files) {
-            logger_1.logger.info(`Processing file: ${file.path}`);
-            if (!file.path || file.path === "/dev/null") {
-                continue;
-            }
-            for (const hunk of file.hunks) {
-                if (hunk.lines.length === 0) {
-                    continue;
-                }
-                hunkCount++;
-                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
-                try {
-                    const hunkContent = hunk.lines.join("\n");
-                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails);
-                    const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
-                    allComments.push(...comments);
-                }
-                catch (error) {
-                    logger_1.logger.error(`Error processing hunk ${hunkCount}:`, error);
-                }
-            }
-        }
-        logger_1.logger.success(`Individual processing generated ${allComments.length} comments`);
-        return allComments;
-    }
-}
-exports.CodeReviewService = CodeReviewService;
-async function main() {
-    try {
-        const githubToken = process.env.GITHUB_TOKEN;
-        const geminiApiKey = process.env.GEMINI_API_KEY;
-        const excludeInput = process.env.INPUT_EXCLUDE || "";
-        const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
-        if (!githubToken) {
-            throw new Error("GITHUB_TOKEN environment variable is required");
-        }
-        if (!geminiApiKey) {
-            throw new Error("GEMINI_API_KEY environment variable is required");
-        }
-        const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
-        logger_1.logger.verbose(`🚀 Starting Code Review with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model);
-        await codeReviewService.processCodeReview();
-        logger_1.logger.success("✨ Code Review completed successfully!");
-    }
-    catch (error) {
-        logger_1.logger.error("💥 Error in main:", error);
-        process.exit(1);
-    }
-}
-if (require.main === require.cache[eval('__filename')]) {
-    main();
-}
-
-})();
-
-module.exports = __webpack_exports__;
+/******/ 	
+/******/ 	// startup
+/******/ 	// Load entry module and return exports
+/******/ 	// This entry module is referenced by other modules so it can't be inlined
+/******/ 	var __webpack_exports__ = __nccwpck_require__(6549);
+/******/ 	module.exports = __webpack_exports__;
+/******/ 	
 /******/ })()
 ;
 //# sourceMappingURL=index.js.map

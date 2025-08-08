@@ -13,6 +13,7 @@ import {
   parseDiffToFileData,
   createCommentsFromAiResponses,
 } from "./utils/helpers";
+import pkg from "../package.json";
 
 export class CodeReviewService {
   private readonly githubService: GitHubService;
@@ -241,9 +242,9 @@ async function main(): Promise<void> {
 
     const excludePatterns = parseExcludePatterns(excludeInput);
     logger.verbose(
-      `🚀 Starting Code Review with model: ${model}, exclude patterns: ${excludePatterns.join(
-        ", "
-      )}`
+      `🚀 Starting Code Review Action (@v${
+        pkg.version
+      }) with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`
     );
 
     const codeReviewService = new CodeReviewService(
