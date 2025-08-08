@@ -49101,15 +49101,14 @@ exports.CodeReviewService = CodeReviewService;
 async function main() {
     try {
         const githubToken = process.env.GITHUB_TOKEN;
-        // GitHub Action inputs are prefixed with INPUT_
-        const geminiApiKey = process.env.INPUT_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+        const geminiApiKey = process.env.GEMINI_API_KEY;
         const excludeInput = process.env.INPUT_EXCLUDE || "";
         const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
         if (!githubToken) {
             throw new Error("GITHUB_TOKEN environment variable is required");
         }
         if (!geminiApiKey) {
-            throw new Error("GEMINI_API_KEY or INPUT_GEMINI_API_KEY environment variable is required");
+            throw new Error("GEMINI_API_KEY environment variable is required");
         }
         const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
         logger_1.logger.verbose(`🚀 Starting Code Review with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`);

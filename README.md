@@ -36,7 +36,9 @@ jobs:
           # Optional: Override the default exclude patterns
           # exclude: '*.md,*.json,package-lock.json,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*'
           model: gemini-2.0-flash-lite # default is gemini-2.5-pro
-          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # good practice to pass this explicitly, even tho GH takes care of it
 ```
 
 ## How It Works

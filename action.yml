@@ -13,10 +13,6 @@ inputs:
     required: false
     default: "gemini-2.5-pro"
 
-  gemini-api-key:
-    description: "The API key to use for the Google Gemini API. You can obtain one with a free tier from [Google AI Studio](https://aistudio.google.com/app/apikey)."
-    required: true
-
 runs:
   using: "node20"
   main: "dist/index.js"

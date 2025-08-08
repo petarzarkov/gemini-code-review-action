@@ -8,8 +8,7 @@ async function testCodeReview(): Promise<void> {
 
     // Check required environment variables
     const githubToken = process.env.GITHUB_TOKEN;
-    const geminiApiKey =
-      process.env.INPUT_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    const geminiApiKey = process.env.GEMINI_API_KEY;
     const excludeInput = process.env.INPUT_EXCLUDE || "";
     const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
 
@@ -18,9 +17,7 @@ async function testCodeReview(): Promise<void> {
     }
 
     if (!geminiApiKey) {
-      throw new Error(
-        "GEMINI_API_KEY or INPUT_GEMINI_API_KEY environment variable is required"
-      );
+      throw new Error("GEMINI_API_KEY environment variable is required");
     }
 
     // Mock GitHub event data for testing
