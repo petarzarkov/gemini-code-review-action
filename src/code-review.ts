@@ -426,15 +426,21 @@ export class CodeReviewService {
           continue;
         }
 
-        // Find the position of this exact line within the hunk.
-        // The position is the 1-based index of the line in the hunk array.
+        const normalizedAiLine = lineContent.trim().replace(/\s+/g, " ");
+
         const position =
-          hunk.lines.findIndex((hunkLine) => hunkLine === lineContent) + 1;
+          hunk.lines.findIndex((hunkLine) => {
+            // Normalize the hunk line in the exact same way before comparing
+            const normalizedHunkLine = hunkLine.trim().replace(/\s+/g, " ");
+            return normalizedHunkLine === normalizedAiLine;
+          }) + 1;
 
         // If we couldn't find the line in the hunk, the AI hallucinated. Skip it.
         if (position === 0) {
           logger.warn(
-            `AI provided lineContent that was not found in the hunk, skipping: "${lineContent}"`
+            `AI provided lineContent that was not found in the hunk, skipping.
+          - AI Line (Normalized): "${normalizedAiLine}"
+          - Original AI Line: "${lineContent}"`
           );
           continue;
         }
@@ -449,7 +455,7 @@ export class CodeReviewService {
         logger.debug(
           `Created comment for position ${position}: ${reviewComment.substring(
             0,
-            50
+            100
           )}...`
         );
       } catch (error) {
