@@ -6,12 +6,17 @@ import {
   AiResponseData,
   BatchReviewRequest,
   BatchAiResponseData,
+  ConversationContext,
 } from "../types/code-review";
 import { logger } from "../utils/logger";
 import {
   createSingleReviewPrompt,
   createBatchReviewPrompt,
 } from "../config/prompts";
+import {
+  summarizeConversationContext,
+  shouldIncludeContext,
+} from "../utils/conversation-context";
 
 export class AIService {
   private readonly genAi: GoogleGenAI;
@@ -113,9 +118,14 @@ export class AIService {
 
   public async reviewBatch(
     batch: BatchReviewRequest,
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): Promise<AiReviewResponse[]> {
-    const prompt = this.createBatchReviewPrompt(batch, prDetails);
+    const prompt = this.createBatchReviewPrompt(
+      batch,
+      prDetails,
+      conversationContext
+    );
     const aiResponses = await this.getAiResponse(prompt, true);
     return aiResponses;
   }
@@ -123,12 +133,14 @@ export class AIService {
   public async reviewSingle(
     filePath: string,
     hunkContent: string,
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): Promise<AiReviewResponse[]> {
     const prompt = this.createSingleReviewPrompt(
       filePath,
       hunkContent,
-      prDetails
+      prDetails,
+      conversationContext
     );
     const aiResponses = await this.getAiResponse(prompt, false);
     return aiResponses;
@@ -136,7 +148,8 @@ export class AIService {
 
   private createBatchReviewPrompt(
     batch: BatchReviewRequest,
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): string {
     const filesContent = batch.files
       .map(
@@ -145,24 +158,37 @@ export class AIService {
       )
       .join("\n\n");
 
+    const contextString =
+      conversationContext && shouldIncludeContext(conversationContext)
+        ? summarizeConversationContext(conversationContext)
+        : undefined;
+
     return createBatchReviewPrompt({
       title: prDetails.title,
       description: prDetails.description || "No description provided",
       filesContent,
       fileCount: batch.files.length,
+      conversationContext: contextString,
     });
   }
 
   private createSingleReviewPrompt(
     filePath: string,
     hunkContent: string,
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): string {
+    const contextString =
+      conversationContext && shouldIncludeContext(conversationContext)
+        ? summarizeConversationContext(conversationContext)
+        : undefined;
+
     return createSingleReviewPrompt({
       filePath,
       title: prDetails.title,
       description: prDetails.description || "No description provided",
       hunkContent,
+      conversationContext: contextString,
     });
   }
 

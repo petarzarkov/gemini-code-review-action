@@ -25090,17 +25090,20 @@ const github_service_1 = __nccwpck_require__(8221);
 const batch_processor_1 = __nccwpck_require__(7951);
 const logger_1 = __nccwpck_require__(187);
 const helpers_1 = __nccwpck_require__(4482);
+const conversation_context_1 = __nccwpck_require__(2354);
 const package_json_1 = __importDefault(__nccwpck_require__(8330));
 class CodeReviewService {
     githubService;
     aiService;
     batchProcessor;
     excludePatterns;
-    constructor(githubToken, geminiApiKey, excludePatterns = [], model) {
+    enableConversationContext;
+    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true) {
         this.githubService = new github_service_1.GitHubService(githubToken);
         this.aiService = new ai_service_1.AIService(geminiApiKey, model);
         this.batchProcessor = new batch_processor_1.BatchProcessor();
         this.excludePatterns = excludePatterns;
+        this.enableConversationContext = enableConversationContext;
     }
     async processCodeReview() {
         try {
@@ -25109,6 +25112,15 @@ class CodeReviewService {
             if (eventName !== "pull_request") {
                 logger_1.logger.warn(`Unsupported event: ${eventName}`);
                 return;
+            }
+            // Retrieve conversation context for continuing the discussion (if enabled)
+            let conversationContext;
+            if (this.enableConversationContext) {
+                conversationContext = await this.githubService.getConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber);
+                (0, conversation_context_1.logContextStats)(conversationContext);
+            }
+            else {
+                logger_1.logger.info("Conversation context is disabled");
             }
             const diff = await this.githubService.getPullRequestDiff(prDetails.owner, prDetails.repo, prDetails.pullNumber);
             if (!diff) {
@@ -25120,13 +25132,26 @@ class CodeReviewService {
             logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
                 .map((f) => f.path)
                 .join(", ")}`);
-            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails);
+            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails, conversationContext);
             if (comments.length > 0) {
                 await this.githubService.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
                 logger_1.logger.success(`Created ${comments.length} review comments`);
+                // Save conversation context for future runs (if enabled)
+                if (this.enableConversationContext && conversationContext) {
+                    const contextSummary = (0, conversation_context_1.createContextSummary)(conversationContext, `Generated ${comments.length} new comment${comments.length > 1 ? "s" : ""} on the latest changes`);
+                    await this.githubService.saveConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber, contextSummary);
+                }
             }
             else {
                 logger_1.logger.info("No review comments generated");
+                // Still save context if this is a follow-up review (if enabled)
+                if (this.enableConversationContext &&
+                    conversationContext &&
+                    (conversationContext.previousReviews.length > 0 ||
+                        conversationContext.previousComments.length > 0)) {
+                    const contextSummary = (0, conversation_context_1.createContextSummary)(conversationContext, "No new issues found in the latest changes");
+                    await this.githubService.saveConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber, contextSummary);
+                }
             }
         }
         catch (error) {
@@ -25147,17 +25172,17 @@ class CodeReviewService {
             return true;
         });
     }
-    async analyzeCodeChanges(files, prDetails) {
+    async analyzeCodeChanges(files, prDetails, conversationContext) {
         logger_1.logger.processing(`Starting analysis of ${files.length} files`);
         // Decide whether to use batch processing or individual file processing
         if (this.batchProcessor.shouldUseBatching(files)) {
-            return this.analyzeBatchMode(files, prDetails);
+            return this.analyzeBatchMode(files, prDetails, conversationContext);
         }
         else {
-            return this.analyzeIndividualMode(files, prDetails);
+            return this.analyzeIndividualMode(files, prDetails, conversationContext);
         }
     }
-    async analyzeBatchMode(files, prDetails) {
+    async analyzeBatchMode(files, prDetails, conversationContext) {
         logger_1.logger.info("Using batch processing mode for performance optimization");
         const batches = this.batchProcessor.createBatches(files);
         const allComments = [];
@@ -25165,7 +25190,7 @@ class CodeReviewService {
             const batch = batches[i];
             logger_1.logger.processing(`Processing batch ${i + 1}/${batches.length} (${batch.files.length} files)`);
             try {
-                const aiResponses = await this.aiService.reviewBatch(batch, prDetails);
+                const aiResponses = await this.aiService.reviewBatch(batch, prDetails, conversationContext);
                 const comments = this.batchProcessor.createCommentsFromBatchResponse(batch, aiResponses);
                 allComments.push(...comments);
                 logger_1.logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
@@ -25174,18 +25199,18 @@ class CodeReviewService {
                 logger_1.logger.error(`Error processing batch ${i + 1}:`, error);
                 // Fallback: try individual file processing for this batch
                 logger_1.logger.info(`Falling back to individual processing for batch ${i + 1}`);
-                const fallbackComments = await this.processBatchFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails);
+                const fallbackComments = await this.processBatchFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails, conversationContext);
                 allComments.push(...fallbackComments);
             }
         }
         logger_1.logger.success(`Batch processing generated ${allComments.length} total comments`);
         return allComments;
     }
-    async analyzeIndividualMode(files, prDetails) {
+    async analyzeIndividualMode(files, prDetails, conversationContext) {
         logger_1.logger.info("Using individual file processing mode");
-        return this.processBatchFilesIndividually(files, prDetails);
+        return this.processBatchFilesIndividually(files, prDetails, conversationContext);
     }
-    async processBatchFilesIndividually(files, prDetails) {
+    async processBatchFilesIndividually(files, prDetails, conversationContext) {
         const allComments = [];
         let hunkCount = 0;
         let totalHunks = 0;
@@ -25209,7 +25234,7 @@ class CodeReviewService {
                 logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
                 try {
                     const hunkContent = hunk.lines.join("\n");
-                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails);
+                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails, conversationContext);
                     const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
                     allComments.push(...comments);
                 }
@@ -25229,6 +25254,7 @@ async function main() {
         const geminiApiKey = process.env.GEMINI_API_KEY;
         const excludeInput = process.env.INPUT_EXCLUDE || "";
         const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
+        const enableConversationContext = (process.env.INPUT_ENABLE_CONVERSATION_CONTEXT || "true").toLowerCase() === "true";
         if (!githubToken) {
             throw new Error("GITHUB_TOKEN environment variable is required");
         }
@@ -25236,8 +25262,8 @@ async function main() {
             throw new Error("GEMINI_API_KEY environment variable is required");
         }
         const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
-        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model);
+        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, conversation context: ${enableConversationContext ? "enabled" : "disabled"}, exclude patterns: ${excludePatterns.join(", ")}`);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext);
         await codeReviewService.processCodeReview();
         logger_1.logger.success("✨ Code Review completed successfully!");
     }
@@ -25298,6 +25324,17 @@ const batchFileLineRules = `4.  **Cross-File Analysis:** Since you're reviewing 
 2.  **Exact Line Matching:** The \`lineContent\` MUST be the EXACT line from the diff, including the \`+\` prefix and all whitespace.
 3.  **Multi-File Context:** When reviewing multiple files, ensure your \`lineContent\` exactly matches the line from the specific file you're commenting on.`;
 function createSingleReviewPrompt(context) {
+    const conversationSection = context.conversationContext
+        ? `
+
+<CONVERSATION_CONTEXT>
+This pull request has been reviewed before. Here's the previous conversation context to help you continue the discussion appropriately:
+
+${context.conversationContext}
+
+Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
+</CONVERSATION_CONTEXT>`
+        : "";
     return `${basePromptRules}
 
 ${singleFileLineRules}
@@ -25312,7 +25349,7 @@ ${context.title}
 
 <PULL_REQUEST_DESCRIPTION>
 ${context.description}
-</PULL_REQUEST_DESCRIPTION>
+</PULL_REQUEST_DESCRIPTION>${conversationSection}
 
 <FILE_PATH>
 ${context.filePath}
@@ -25325,6 +25362,17 @@ ${context.hunkContent}
 </GIT_DIFF_HUNK_TO_REVIEW>`;
 }
 function createBatchReviewPrompt(context) {
+    const conversationSection = context.conversationContext
+        ? `
+
+<CONVERSATION_CONTEXT>
+This pull request has been reviewed before. Here's the previous conversation context to help you continue the discussion appropriately:
+
+${context.conversationContext}
+
+Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
+</CONVERSATION_CONTEXT>`
+        : "";
     return `${basePromptRules}
 
 ${batchFileLineRules}
@@ -25339,7 +25387,7 @@ ${context.title}
 
 <PULL_REQUEST_DESCRIPTION>
 ${context.description}
-</PULL_REQUEST_DESCRIPTION>
+</PULL_REQUEST_DESCRIPTION>${conversationSection}
 
 <FILES_TO_REVIEW>
 ${context.filesContent}
@@ -25617,6 +25665,7 @@ exports.AIService = void 0;
 const genai_1 = __nccwpck_require__(7002);
 const logger_1 = __nccwpck_require__(187);
 const prompts_1 = __nccwpck_require__(1159);
+const conversation_context_1 = __nccwpck_require__(2354);
 class AIService {
     genAi;
     currentModelName;
@@ -25678,33 +25727,41 @@ class AIService {
         }
         this.lastRequestTime = Date.now();
     }
-    async reviewBatch(batch, prDetails) {
-        const prompt = this.createBatchReviewPrompt(batch, prDetails);
+    async reviewBatch(batch, prDetails, conversationContext) {
+        const prompt = this.createBatchReviewPrompt(batch, prDetails, conversationContext);
         const aiResponses = await this.getAiResponse(prompt, true);
         return aiResponses;
     }
-    async reviewSingle(filePath, hunkContent, prDetails) {
-        const prompt = this.createSingleReviewPrompt(filePath, hunkContent, prDetails);
+    async reviewSingle(filePath, hunkContent, prDetails, conversationContext) {
+        const prompt = this.createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext);
         const aiResponses = await this.getAiResponse(prompt, false);
         return aiResponses;
     }
-    createBatchReviewPrompt(batch, prDetails) {
+    createBatchReviewPrompt(batch, prDetails, conversationContext) {
         const filesContent = batch.files
             .map((file, index) => `File ${index + 1}: ${file.path}\n\`\`\`diff\n${file.content}\n\`\`\``)
             .join("\n\n");
+        const contextString = conversationContext && (0, conversation_context_1.shouldIncludeContext)(conversationContext)
+            ? (0, conversation_context_1.summarizeConversationContext)(conversationContext)
+            : undefined;
         return (0, prompts_1.createBatchReviewPrompt)({
             title: prDetails.title,
             description: prDetails.description || "No description provided",
             filesContent,
             fileCount: batch.files.length,
+            conversationContext: contextString,
         });
     }
-    createSingleReviewPrompt(filePath, hunkContent, prDetails) {
+    createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext) {
+        const contextString = conversationContext && (0, conversation_context_1.shouldIncludeContext)(conversationContext)
+            ? (0, conversation_context_1.summarizeConversationContext)(conversationContext)
+            : undefined;
         return (0, prompts_1.createSingleReviewPrompt)({
             filePath,
             title: prDetails.title,
             description: prDetails.description || "No description provided",
             hunkContent,
+            conversationContext: contextString,
         });
     }
     async getAiResponse(prompt, isBatch, retryCount = 0) {
@@ -25997,8 +26054,268 @@ class GitHubService {
             throw error;
         }
     }
+    async getConversationContext(owner, repo, pullNumber) {
+        try {
+            logger_1.logger.processing(`Retrieving conversation context for PR #${pullNumber}`);
+            // Get existing reviews and comments from this action
+            const [reviews, comments] = await Promise.all([
+                this.octokit.pulls.listReviews({
+                    owner,
+                    repo,
+                    pull_number: pullNumber,
+                }),
+                this.octokit.pulls.listReviewComments({
+                    owner,
+                    repo,
+                    pull_number: pullNumber,
+                }),
+            ]);
+            // Filter for comments made by this action
+            const actionReviews = reviews.data.filter((review) => review.body?.includes(package_json_1.default.name) &&
+                review.user?.login === "github-actions[bot]");
+            const actionComments = comments.data.filter((comment) => comment.user?.login === "github-actions[bot]");
+            // Get PR conversations (issue comments)
+            const issueComments = await this.octokit.issues.listComments({
+                owner,
+                repo,
+                issue_number: pullNumber,
+            });
+            const actionIssueComments = issueComments.data.filter((comment) => comment.user?.login === "github-actions[bot]" &&
+                comment.body?.includes(`[${package_json_1.default.name}:context]`));
+            const context = {
+                previousReviews: actionReviews.map((review) => ({
+                    id: review.id,
+                    body: review.body || "",
+                    createdAt: review.submitted_at || new Date().toISOString(),
+                    updatedAt: review.submitted_at || new Date().toISOString(),
+                })),
+                previousComments: actionComments.map((comment) => ({
+                    id: comment.id,
+                    body: comment.body || "",
+                    path: comment.path,
+                    line: comment.original_line || comment.line || 0,
+                    createdAt: comment.created_at || new Date().toISOString(),
+                    updatedAt: comment.updated_at ||
+                        comment.created_at ||
+                        new Date().toISOString(),
+                })),
+                conversationHistory: actionIssueComments.map((comment) => ({
+                    id: comment.id,
+                    body: comment.body || "",
+                    createdAt: comment.created_at || new Date().toISOString(),
+                })),
+            };
+            logger_1.logger.info(`Retrieved context: ${context.previousReviews.length} reviews, ` +
+                `${context.previousComments.length} comments, ` +
+                `${context.conversationHistory.length} conversation entries`);
+            return context;
+        }
+        catch (error) {
+            logger_1.logger.error("Error retrieving conversation context:", error);
+            // Return empty context on error to allow processing to continue
+            return {
+                previousReviews: [],
+                previousComments: [],
+                conversationHistory: [],
+            };
+        }
+    }
+    async saveConversationContext(owner, repo, pullNumber, contextSummary) {
+        try {
+            logger_1.logger.processing("Saving conversation context summary");
+            const contextComment = `<!-- [${package_json_1.default.name}:context] -->
+### 🔄 Conversation Context Updated
+
+This PR has been reviewed multiple times. Here's a summary of the ongoing conversation:
+
+${contextSummary}
+
+---
+*This comment helps maintain context across multiple review runs.*`;
+            await this.octokit.issues.createComment({
+                owner,
+                repo,
+                issue_number: pullNumber,
+                body: contextComment,
+            });
+            logger_1.logger.success("Conversation context saved");
+        }
+        catch (error) {
+            logger_1.logger.error("Error saving conversation context:", error);
+            // Don't throw - context saving is nice-to-have, not critical
+        }
+    }
 }
 exports.GitHubService = GitHubService;
+
+
+/***/ }),
+
+/***/ 2354:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.summarizeConversationContext = summarizeConversationContext;
+exports.createContextSummary = createContextSummary;
+exports.shouldIncludeContext = shouldIncludeContext;
+exports.logContextStats = logContextStats;
+const logger_1 = __nccwpck_require__(187);
+/**
+ * Creates a summarized conversation context string from the full context object.
+ * This is used to provide context to the AI without overwhelming it with too much information.
+ */
+function summarizeConversationContext(context) {
+    const parts = [];
+    // Add summary of previous reviews
+    if (context.previousReviews.length > 0) {
+        const reviewSummary = context.previousReviews
+            .slice(-3) // Only include last 3 reviews to avoid token limit
+            .map((review, index) => {
+            const date = new Date(review.createdAt).toLocaleDateString();
+            const cleanBody = review.body
+                .replace(/<!--.*?-->/gs, "") // Remove HTML comments
+                .replace(/\[.*?\]/g, "") // Remove markdown links
+                .trim();
+            const firstLine = cleanBody.split("\n")[0] || cleanBody;
+            const preview = firstLine.length > 100
+                ? firstLine.substring(0, 100) + "..."
+                : firstLine;
+            return `  ${index + 1}. Review from ${date}: ${preview}`;
+        })
+            .join("\n");
+        parts.push(`**Previous Reviews (${context.previousReviews.length} total, showing latest):**\n${reviewSummary}`);
+    }
+    // Add summary of key comments
+    if (context.previousComments.length > 0) {
+        const uniqueFiles = new Set(context.previousComments.map((c) => c.path));
+        const commentsByFile = new Map();
+        context.previousComments.forEach((comment) => {
+            if (!commentsByFile.has(comment.path)) {
+                commentsByFile.set(comment.path, []);
+            }
+            commentsByFile.get(comment.path).push(comment);
+        });
+        const fileSummaries = Array.from(commentsByFile.entries())
+            .slice(-5) // Limit to 5 most recent files
+            .map(([filePath, comments]) => {
+            const recentComments = comments
+                .slice(-2) // Last 2 comments per file
+                .map((comment) => {
+                const preview = comment.body.length > 80
+                    ? comment.body.substring(0, 80) + "..."
+                    : comment.body;
+                return `    - Line ${comment.line}: ${preview}`;
+            })
+                .join("\n");
+            return `  **${filePath}** (${comments.length} comment${comments.length > 1 ? "s" : ""}):\n${recentComments}`;
+        })
+            .join("\n\n");
+        parts.push(`**Previous Comments on Code (${context.previousComments.length} total across ${uniqueFiles.size} files):**\n${fileSummaries}`);
+    }
+    // Add conversation history summary
+    if (context.conversationHistory.length > 0) {
+        const historyPreview = context.conversationHistory
+            .slice(-2) // Last 2 conversation entries
+            .map((entry, index) => {
+            const date = new Date(entry.createdAt).toLocaleDateString();
+            const cleanBody = entry.body
+                .replace(/<!--.*?-->/gs, "") // Remove HTML comments
+                .replace(/###.*$/gm, "") // Remove headers
+                .replace(/---.*$/gm, "") // Remove separators
+                .replace(/\*This comment.*$/gm, "") // Remove footer text
+                .trim();
+            const preview = cleanBody.length > 150
+                ? cleanBody.substring(0, 150) + "..."
+                : cleanBody;
+            return `  ${index + 1}. ${date}: ${preview}`;
+        })
+            .join("\n");
+        parts.push(`**Conversation History (${context.conversationHistory.length} entries, showing latest):**\n${historyPreview}`);
+    }
+    if (parts.length === 0) {
+        return "";
+    }
+    return parts.join("\n\n");
+}
+/**
+ * Creates a context summary for saving to GitHub comments.
+ * This provides a human-readable summary of the conversation state.
+ */
+function createContextSummary(context, currentReviewSummary) {
+    const parts = [];
+    if (context.previousReviews.length > 0) {
+        parts.push(`📋 **Review History**: ${context.previousReviews.length} previous review${context.previousReviews.length > 1 ? "s" : ""}`);
+    }
+    if (context.previousComments.length > 0) {
+        const uniqueFiles = new Set(context.previousComments.map((c) => c.path));
+        parts.push(`💬 **Comments**: ${context.previousComments.length} comment${context.previousComments.length > 1 ? "s" : ""} across ${uniqueFiles.size} file${uniqueFiles.size > 1 ? "s" : ""}`);
+    }
+    if (currentReviewSummary) {
+        parts.push(`🔍 **Latest Review**: ${currentReviewSummary}`);
+    }
+    const lastActivity = getLastActivityDate(context);
+    if (lastActivity) {
+        parts.push(`🕒 **Last Activity**: ${lastActivity.toLocaleDateString()}`);
+    }
+    return parts.join("\n");
+}
+/**
+ * Determines if context should be included based on the age and amount of previous activity.
+ */
+function shouldIncludeContext(context) {
+    const totalActivity = context.previousReviews.length +
+        context.previousComments.length +
+        context.conversationHistory.length;
+    if (totalActivity === 0) {
+        return false;
+    }
+    // Always include context if there's recent activity
+    const lastActivity = getLastActivityDate(context);
+    if (lastActivity) {
+        const daysSinceLastActivity = (Date.now() - lastActivity.getTime()) / (1000 * 60 * 60 * 24);
+        // Include context if last activity was within 30 days
+        if (daysSinceLastActivity <= 30) {
+            return true;
+        }
+        // For older activity, only include if there's substantial history
+        return totalActivity >= 5;
+    }
+    return totalActivity >= 3;
+}
+/**
+ * Gets the date of the most recent activity in the conversation context.
+ */
+function getLastActivityDate(context) {
+    const dates = [];
+    context.previousReviews.forEach((review) => {
+        dates.push(new Date(review.updatedAt || review.createdAt));
+    });
+    context.previousComments.forEach((comment) => {
+        dates.push(new Date(comment.updatedAt || comment.createdAt));
+    });
+    context.conversationHistory.forEach((entry) => {
+        dates.push(new Date(entry.createdAt));
+    });
+    if (dates.length === 0) {
+        return null;
+    }
+    return new Date(Math.max(...dates.map((d) => d.getTime())));
+}
+/**
+ * Logs conversation context statistics for debugging.
+ */
+function logContextStats(context) {
+    const stats = {
+        reviews: context.previousReviews.length,
+        comments: context.previousComments.length,
+        conversations: context.conversationHistory.length,
+        shouldInclude: shouldIncludeContext(context),
+        lastActivity: getLastActivityDate(context)?.toISOString() || "none",
+    };
+    logger_1.logger.info(`Conversation context stats: ${JSON.stringify(stats)}`);
+}
 
 
 /***/ }),
@@ -49110,7 +49427,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.5","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.6","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

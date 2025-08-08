@@ -13,6 +13,11 @@ inputs:
     required: false
     default: "gemini-2.5-pro"
 
+  enable_conversation_context:
+    description: "Enable conversation context to maintain discussion continuity across multiple PR reviews. When enabled, the AI will remember previous reviews and comments."
+    required: false
+    default: "true"
+
 runs:
   using: "node20"
   main: "dist/index.js"

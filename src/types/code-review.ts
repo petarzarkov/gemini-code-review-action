@@ -22,6 +22,28 @@ export interface ReviewComment {
   position: number;
 }
 
+export interface ConversationContext {
+  previousReviews: Array<{
+    id: number;
+    body: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  previousComments: Array<{
+    id: number;
+    body: string;
+    path: string;
+    line: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  conversationHistory: Array<{
+    id: number;
+    body: string;
+    createdAt: string;
+  }>;
+}
+
 export interface AiReviewResponse {
   lineContent: string;
   reviewComment: string;

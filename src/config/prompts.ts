@@ -3,6 +3,7 @@ export interface SingleReviewContext {
   description: string;
   filePath: string;
   hunkContent: string;
+  conversationContext?: string;
 }
 
 export interface BatchReviewContext {
@@ -10,6 +11,7 @@ export interface BatchReviewContext {
   description: string;
   filesContent: string;
   fileCount: number;
+  conversationContext?: string;
 }
 
 const basePromptRules = `You are an expert senior software engineer acting as a meticulous code reviewer. Your purpose is to identify potential issues in pull requests and provide constructive feedback.
@@ -52,6 +54,18 @@ const batchFileLineRules = `4.  **Cross-File Analysis:** Since you're reviewing 
 3.  **Multi-File Context:** When reviewing multiple files, ensure your \`lineContent\` exactly matches the line from the specific file you're commenting on.`;
 
 export function createSingleReviewPrompt(context: SingleReviewContext): string {
+  const conversationSection = context.conversationContext
+    ? `
+
+<CONVERSATION_CONTEXT>
+This pull request has been reviewed before. Here's the previous conversation context to help you continue the discussion appropriately:
+
+${context.conversationContext}
+
+Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
+</CONVERSATION_CONTEXT>`
+    : "";
+
   return `${basePromptRules}
 
 ${singleFileLineRules}
@@ -66,7 +80,7 @@ ${context.title}
 
 <PULL_REQUEST_DESCRIPTION>
 ${context.description}
-</PULL_REQUEST_DESCRIPTION>
+</PULL_REQUEST_DESCRIPTION>${conversationSection}
 
 <FILE_PATH>
 ${context.filePath}
@@ -80,6 +94,18 @@ ${context.hunkContent}
 }
 
 export function createBatchReviewPrompt(context: BatchReviewContext): string {
+  const conversationSection = context.conversationContext
+    ? `
+
+<CONVERSATION_CONTEXT>
+This pull request has been reviewed before. Here's the previous conversation context to help you continue the discussion appropriately:
+
+${context.conversationContext}
+
+Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
+</CONVERSATION_CONTEXT>`
+    : "";
+
   return `${basePromptRules}
 
 ${batchFileLineRules}
@@ -94,7 +120,7 @@ ${context.title}
 
 <PULL_REQUEST_DESCRIPTION>
 ${context.description}
-</PULL_REQUEST_DESCRIPTION>
+</PULL_REQUEST_DESCRIPTION>${conversationSection}
 
 <FILES_TO_REVIEW>
 ${context.filesContent}

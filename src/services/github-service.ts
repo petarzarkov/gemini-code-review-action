@@ -4,6 +4,7 @@ import {
   PullRequestDetails,
   GitHubEventData,
   ReviewComment,
+  ConversationContext,
 } from "../types/code-review";
 import { logger } from "../utils/logger";
 import pkg from "../../package.json";
@@ -96,6 +97,130 @@ export class GitHubService {
     } catch (error) {
       logger.error("Error creating review:", error);
       throw error;
+    }
+  }
+
+  public async getConversationContext(
+    owner: string,
+    repo: string,
+    pullNumber: number
+  ): Promise<ConversationContext> {
+    try {
+      logger.processing(
+        `Retrieving conversation context for PR #${pullNumber}`
+      );
+
+      // Get existing reviews and comments from this action
+      const [reviews, comments] = await Promise.all([
+        this.octokit.pulls.listReviews({
+          owner,
+          repo,
+          pull_number: pullNumber,
+        }),
+        this.octokit.pulls.listReviewComments({
+          owner,
+          repo,
+          pull_number: pullNumber,
+        }),
+      ]);
+
+      // Filter for comments made by this action
+      const actionReviews = reviews.data.filter(
+        (review) =>
+          review.body?.includes(pkg.name) &&
+          review.user?.login === "github-actions[bot]"
+      );
+
+      const actionComments = comments.data.filter(
+        (comment) => comment.user?.login === "github-actions[bot]"
+      );
+
+      // Get PR conversations (issue comments)
+      const issueComments = await this.octokit.issues.listComments({
+        owner,
+        repo,
+        issue_number: pullNumber,
+      });
+
+      const actionIssueComments = issueComments.data.filter(
+        (comment) =>
+          comment.user?.login === "github-actions[bot]" &&
+          comment.body?.includes(`[${pkg.name}:context]`)
+      );
+
+      const context: ConversationContext = {
+        previousReviews: actionReviews.map((review) => ({
+          id: review.id,
+          body: review.body || "",
+          createdAt: review.submitted_at || new Date().toISOString(),
+          updatedAt: review.submitted_at || new Date().toISOString(),
+        })),
+        previousComments: actionComments.map((comment) => ({
+          id: comment.id,
+          body: comment.body || "",
+          path: comment.path,
+          line: comment.original_line || comment.line || 0,
+          createdAt: comment.created_at || new Date().toISOString(),
+          updatedAt:
+            comment.updated_at ||
+            comment.created_at ||
+            new Date().toISOString(),
+        })),
+        conversationHistory: actionIssueComments.map((comment) => ({
+          id: comment.id,
+          body: comment.body || "",
+          createdAt: comment.created_at || new Date().toISOString(),
+        })),
+      };
+
+      logger.info(
+        `Retrieved context: ${context.previousReviews.length} reviews, ` +
+          `${context.previousComments.length} comments, ` +
+          `${context.conversationHistory.length} conversation entries`
+      );
+
+      return context;
+    } catch (error) {
+      logger.error("Error retrieving conversation context:", error);
+      // Return empty context on error to allow processing to continue
+      return {
+        previousReviews: [],
+        previousComments: [],
+        conversationHistory: [],
+      };
+    }
+  }
+
+  public async saveConversationContext(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    contextSummary: string
+  ): Promise<void> {
+    try {
+      logger.processing("Saving conversation context summary");
+
+      const contextComment = `<!-- [${pkg.name}:context] -->
+### 🔄 Conversation Context Updated
+
+This PR has been reviewed multiple times. Here's a summary of the ongoing conversation:
+
+${contextSummary}
+
+---
+*This comment helps maintain context across multiple review runs.*`;
+
+      await this.octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: pullNumber,
+        body: contextComment,
+      });
+
+      logger.success("Conversation context saved");
+    } catch (error) {
+      logger.error("Error saving conversation context:", error);
+      // Don't throw - context saving is nice-to-have, not critical
     }
   }
 }

@@ -5,6 +5,7 @@ import {
   PullRequestDetails,
   FileData,
   ReviewComment,
+  ConversationContext,
 } from "./types/code-review";
 import { logger } from "./utils/logger";
 import {
@@ -13,6 +14,10 @@ import {
   parseDiffToFileData,
   createCommentsFromAiResponses,
 } from "./utils/helpers";
+import {
+  createContextSummary,
+  logContextStats,
+} from "./utils/conversation-context";
 import pkg from "../package.json";
 
 export class CodeReviewService {
@@ -21,16 +26,20 @@ export class CodeReviewService {
   private readonly batchProcessor: BatchProcessor;
   private readonly excludePatterns: string[];
 
+  private readonly enableConversationContext: boolean;
+
   constructor(
     githubToken: string,
     geminiApiKey: string,
     excludePatterns: string[] = [],
-    model?: string
+    model?: string,
+    enableConversationContext: boolean = true
   ) {
     this.githubService = new GitHubService(githubToken);
     this.aiService = new AIService(geminiApiKey, model);
     this.batchProcessor = new BatchProcessor();
     this.excludePatterns = excludePatterns;
+    this.enableConversationContext = enableConversationContext;
   }
 
   public async processCodeReview(): Promise<void> {
@@ -41,6 +50,21 @@ export class CodeReviewService {
       if (eventName !== "pull_request") {
         logger.warn(`Unsupported event: ${eventName}`);
         return;
+      }
+
+      // Retrieve conversation context for continuing the discussion (if enabled)
+      let conversationContext: ConversationContext | undefined;
+
+      if (this.enableConversationContext) {
+        conversationContext = await this.githubService.getConversationContext(
+          prDetails.owner,
+          prDetails.repo,
+          prDetails.pullNumber
+        );
+
+        logContextStats(conversationContext);
+      } else {
+        logger.info("Conversation context is disabled");
       }
 
       const diff = await this.githubService.getPullRequestDiff(
@@ -62,7 +86,11 @@ export class CodeReviewService {
           .join(", ")}`
       );
 
-      const comments = await this.analyzeCodeChanges(filteredDiff, prDetails);
+      const comments = await this.analyzeCodeChanges(
+        filteredDiff,
+        prDetails,
+        conversationContext
+      );
 
       if (comments.length > 0) {
         await this.githubService.createReviewComments(
@@ -72,8 +100,45 @@ export class CodeReviewService {
           comments
         );
         logger.success(`Created ${comments.length} review comments`);
+
+        // Save conversation context for future runs (if enabled)
+        if (this.enableConversationContext && conversationContext) {
+          const contextSummary = createContextSummary(
+            conversationContext,
+            `Generated ${comments.length} new comment${
+              comments.length > 1 ? "s" : ""
+            } on the latest changes`
+          );
+
+          await this.githubService.saveConversationContext(
+            prDetails.owner,
+            prDetails.repo,
+            prDetails.pullNumber,
+            contextSummary
+          );
+        }
       } else {
         logger.info("No review comments generated");
+
+        // Still save context if this is a follow-up review (if enabled)
+        if (
+          this.enableConversationContext &&
+          conversationContext &&
+          (conversationContext.previousReviews.length > 0 ||
+            conversationContext.previousComments.length > 0)
+        ) {
+          const contextSummary = createContextSummary(
+            conversationContext,
+            "No new issues found in the latest changes"
+          );
+
+          await this.githubService.saveConversationContext(
+            prDetails.owner,
+            prDetails.repo,
+            prDetails.pullNumber,
+            contextSummary
+          );
+        }
       }
     } catch (error) {
       logger.error("Error in code review process:", error);
@@ -102,21 +167,23 @@ export class CodeReviewService {
 
   private async analyzeCodeChanges(
     files: FileData[],
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): Promise<ReviewComment[]> {
     logger.processing(`Starting analysis of ${files.length} files`);
 
     // Decide whether to use batch processing or individual file processing
     if (this.batchProcessor.shouldUseBatching(files)) {
-      return this.analyzeBatchMode(files, prDetails);
+      return this.analyzeBatchMode(files, prDetails, conversationContext);
     } else {
-      return this.analyzeIndividualMode(files, prDetails);
+      return this.analyzeIndividualMode(files, prDetails, conversationContext);
     }
   }
 
   private async analyzeBatchMode(
     files: FileData[],
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): Promise<ReviewComment[]> {
     logger.info("Using batch processing mode for performance optimization");
 
@@ -132,7 +199,11 @@ export class CodeReviewService {
       );
 
       try {
-        const aiResponses = await this.aiService.reviewBatch(batch, prDetails);
+        const aiResponses = await this.aiService.reviewBatch(
+          batch,
+          prDetails,
+          conversationContext
+        );
         const comments = this.batchProcessor.createCommentsFromBatchResponse(
           batch,
           aiResponses
@@ -147,7 +218,8 @@ export class CodeReviewService {
         logger.info(`Falling back to individual processing for batch ${i + 1}`);
         const fallbackComments = await this.processBatchFilesIndividually(
           batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })),
-          prDetails
+          prDetails,
+          conversationContext
         );
         allComments.push(...fallbackComments);
       }
@@ -161,15 +233,21 @@ export class CodeReviewService {
 
   private async analyzeIndividualMode(
     files: FileData[],
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): Promise<ReviewComment[]> {
     logger.info("Using individual file processing mode");
-    return this.processBatchFilesIndividually(files, prDetails);
+    return this.processBatchFilesIndividually(
+      files,
+      prDetails,
+      conversationContext
+    );
   }
 
   private async processBatchFilesIndividually(
     files: FileData[],
-    prDetails: PullRequestDetails
+    prDetails: PullRequestDetails,
+    conversationContext?: ConversationContext
   ): Promise<ReviewComment[]> {
     const allComments: ReviewComment[] = [];
     let hunkCount = 0;
@@ -204,7 +282,8 @@ export class CodeReviewService {
           const aiResponses = await this.aiService.reviewSingle(
             file.path,
             hunkContent,
-            prDetails
+            prDetails,
+            conversationContext
           );
           const comments = createCommentsFromAiResponses(
             file.path,
@@ -231,6 +310,10 @@ async function main(): Promise<void> {
     const geminiApiKey = process.env.GEMINI_API_KEY;
     const excludeInput = process.env.INPUT_EXCLUDE || "";
     const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
+    const enableConversationContext =
+      (
+        process.env.INPUT_ENABLE_CONVERSATION_CONTEXT || "true"
+      ).toLowerCase() === "true";
 
     if (!githubToken) {
       throw new Error("GITHUB_TOKEN environment variable is required");
@@ -244,14 +327,17 @@ async function main(): Promise<void> {
     logger.verbose(
       `🚀 Starting Code Review Action (@v${
         pkg.version
-      }) with model: ${model}, exclude patterns: ${excludePatterns.join(", ")}`
+      }) with model: ${model}, conversation context: ${
+        enableConversationContext ? "enabled" : "disabled"
+      }, exclude patterns: ${excludePatterns.join(", ")}`
     );
 
     const codeReviewService = new CodeReviewService(
       githubToken,
       geminiApiKey,
       excludePatterns,
-      model
+      model,
+      enableConversationContext
     );
     await codeReviewService.processCodeReview();
 
