@@ -25402,7 +25402,12 @@ class AIService {
             return this.promptTemplate;
         }
         try {
-            const promptPath = node_path_1.default.join(__dirname, "../config/prompt.txt");
+            // Try bundled path first (config folder next to the bundled file)
+            let promptPath = node_path_1.default.join(__dirname, "config/prompt.txt");
+            // Fallback to development path if bundled path doesn't exist
+            if (!node_fs_1.default.existsSync(promptPath)) {
+                promptPath = node_path_1.default.join(__dirname, "../config/prompt.txt");
+            }
             this.promptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
             return this.promptTemplate;
         }
@@ -25416,7 +25421,12 @@ class AIService {
             return this.batchPromptTemplate;
         }
         try {
-            const promptPath = node_path_1.default.join(__dirname, "../config/batch-prompt.txt");
+            // Try bundled path first (config folder next to the bundled file)
+            let promptPath = node_path_1.default.join(__dirname, "config/batch-prompt.txt");
+            // Fallback to development path if bundled path doesn't exist
+            if (!node_fs_1.default.existsSync(promptPath)) {
+                promptPath = node_path_1.default.join(__dirname, "../config/batch-prompt.txt");
+            }
             this.batchPromptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
             return this.batchPromptTemplate;
         }
@@ -48883,7 +48893,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.1","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.2","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

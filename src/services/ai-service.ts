@@ -98,7 +98,14 @@ export class AIService {
     }
 
     try {
-      const promptPath = path.join(__dirname, "../config/prompt.txt");
+      // Try bundled path first (config folder next to the bundled file)
+      let promptPath = path.join(__dirname, "config/prompt.txt");
+
+      // Fallback to development path if bundled path doesn't exist
+      if (!fs.existsSync(promptPath)) {
+        promptPath = path.join(__dirname, "../config/prompt.txt");
+      }
+
       this.promptTemplate = fs.readFileSync(promptPath, "utf8");
       return this.promptTemplate;
     } catch (error) {
@@ -113,7 +120,14 @@ export class AIService {
     }
 
     try {
-      const promptPath = path.join(__dirname, "../config/batch-prompt.txt");
+      // Try bundled path first (config folder next to the bundled file)
+      let promptPath = path.join(__dirname, "config/batch-prompt.txt");
+
+      // Fallback to development path if bundled path doesn't exist
+      if (!fs.existsSync(promptPath)) {
+        promptPath = path.join(__dirname, "../config/batch-prompt.txt");
+      }
+
       this.batchPromptTemplate = fs.readFileSync(promptPath, "utf8");
       return this.batchPromptTemplate;
     } catch (error) {

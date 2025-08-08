@@ -2,7 +2,7 @@
 
 ## Free to use, deranks the model if rate limits are hit
 
-[](https://www.google.com/search?q=https://github.com/marketplace/actions/gemini-ai-code-review-action) [](https://opensource.org/licenses/MIT)
+[](https://www.google.com/search?q=github,gemini-ai-code-review-action,"petarzarkov")
 
 This GitHub Action uses Google's powerful Gemini family of models to perform an automated, AI-powered code review on your pull requests. It analyzes the code changes (diffs) and posts review comments directly on the relevant lines, helping you catch potential issues, improve code quality, and accelerate the review process.
 
@@ -38,7 +38,7 @@ jobs:
           model: gemini-2.0-flash-lite # default is gemini-2.5-pro
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # good practice to pass this explicitly, even tho GH takes care of it
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## How It Works
@@ -57,9 +57,9 @@ The action's behavior can be customized with the following input:
 
 This action requires the following secrets to be set in your repository:
 
-| Secret           | Description                                                                                                                                                                                              |
-| :--------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GEMINI_API_KEY` | **Required.** Your API key for the Google Gemini API. You can obtain one with a free tier from [Google AI Studio](https://aistudio.google.com/app/apikey).                                               |
-| `GITHUB_TOKEN`   | **Provided by GitHub.** This token is used to post comments on your pull request. The workflow needs `pull-requests: write` permissions for this to work. The token is automatically provided by GitHub. |
+| Secret           | Description                                                                                                                                                |
+| :--------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY` | **Required.** Your API key for the Google Gemini API. You can obtain one with a free tier from [Google AI Studio](https://aistudio.google.com/app/apikey). |
+| `GITHUB_TOKEN`   | **Provided by GitHub.** This token is used to post comments on your pull request. The workflow needs `pull-requests: write` permissions for this to work.  |
 
 To add the `GEMINI_API_KEY`, go to your repository's `Settings` \> `Secrets and variables` \> `Actions`, and create a new repository secret.
