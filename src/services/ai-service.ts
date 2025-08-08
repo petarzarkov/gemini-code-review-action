@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
 import {
   PullRequestDetails,
@@ -10,15 +8,16 @@ import {
   BatchAiResponseData,
 } from "../types/code-review";
 import { logger } from "../utils/logger";
-import { interpolate } from "../utils/helpers";
+import {
+  createSingleReviewPrompt,
+  createBatchReviewPrompt,
+} from "../config/prompts";
 
 export class AIService {
   private readonly genAi: GoogleGenAI;
   private currentModelName: string;
   private readonly rpmLimits: Record<string, number>;
   private readonly modelHierarchy: string[];
-  private promptTemplate: string | null = null;
-  private batchPromptTemplate: string | null = null;
   private lastRequestTime: number = 0;
   private rateLimitDelay: number = 0;
 
@@ -92,52 +91,6 @@ export class AIService {
     return true;
   }
 
-  private loadPromptTemplate(): string {
-    if (this.promptTemplate !== null) {
-      return this.promptTemplate;
-    }
-
-    try {
-      // Try bundled path first (config folder next to the bundled file)
-      let promptPath = path.join(__dirname, "config/prompt.txt");
-
-      // Fallback to development path if bundled path doesn't exist
-      if (!fs.existsSync(promptPath)) {
-        promptPath = path.join(__dirname, "../config/prompt.txt");
-      }
-
-      this.promptTemplate = fs.readFileSync(promptPath, "utf8");
-      return this.promptTemplate;
-    } catch (error) {
-      logger.error("Error loading prompt template:", error);
-      throw new Error("Failed to load prompt template file");
-    }
-  }
-
-  private loadBatchPromptTemplate(): string {
-    if (this.batchPromptTemplate !== null) {
-      return this.batchPromptTemplate;
-    }
-
-    try {
-      // Try bundled path first (config folder next to the bundled file)
-      let promptPath = path.join(__dirname, "config/batch-prompt.txt");
-
-      // Fallback to development path if bundled path doesn't exist
-      if (!fs.existsSync(promptPath)) {
-        promptPath = path.join(__dirname, "../config/batch-prompt.txt");
-      }
-
-      this.batchPromptTemplate = fs.readFileSync(promptPath, "utf8");
-      return this.batchPromptTemplate;
-    } catch (error) {
-      logger.warn(
-        "Batch prompt template not found, falling back to single prompt"
-      );
-      return this.loadPromptTemplate();
-    }
-  }
-
   private async enforceRateLimit(): Promise<void> {
     const now = Date.now();
     const timeSinceLastRequest = now - this.lastRequestTime;
@@ -185,8 +138,6 @@ export class AIService {
     batch: BatchReviewRequest,
     prDetails: PullRequestDetails
   ): string {
-    const template = this.loadBatchPromptTemplate();
-
     const filesContent = batch.files
       .map(
         (file, index) =>
@@ -194,14 +145,12 @@ export class AIService {
       )
       .join("\n\n");
 
-    const variables = {
+    return createBatchReviewPrompt({
       title: prDetails.title,
       description: prDetails.description || "No description provided",
       filesContent,
       fileCount: batch.files.length,
-    };
-
-    return interpolate(template, variables);
+    });
   }
 
   private createSingleReviewPrompt(
@@ -209,16 +158,12 @@ export class AIService {
     hunkContent: string,
     prDetails: PullRequestDetails
   ): string {
-    const template = this.loadPromptTemplate();
-
-    const variables = {
+    return createSingleReviewPrompt({
       filePath,
       title: prDetails.title,
       description: prDetails.description || "No description provided",
       hunkContent,
-    };
-
-    return interpolate(template, variables);
+    });
   }
 
   private async getAiResponse(

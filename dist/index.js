@@ -25075,6 +25075,102 @@ function socketOnError() {
 
 /***/ }),
 
+/***/ 1159:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.createSingleReviewPrompt = createSingleReviewPrompt;
+exports.createBatchReviewPrompt = createBatchReviewPrompt;
+const basePromptRules = `You are an expert senior software engineer acting as a meticulous code reviewer. Your purpose is to identify potential issues in pull requests and provide constructive feedback.
+
+**OUTPUT RULES:**
+
+1.  **JSON Format:** Your entire response MUST be a single JSON object. It must conform to this exact structure:
+    \`{"reviews": [{"lineContent": "<string>", "reviewComment": "<string>", "category": "<string>"}]}\`
+    The \`lineContent\` MUST be the EXACT, full line of code from the diff that you are commenting on, including the leading \`+\` character.
+2.  **Empty Review:** If you find absolutely nothing to improve or comment on, you MUST return an empty reviews array: \`{"reviews": []}\`.
+3.  **GitHub Markdown:** All \`reviewComment\` strings must use GitHub-flavored Markdown.
+4.  **Category:** The \`category\` field must be one of the following strings: "bug", "security", "performance", "style", "suggestion".
+
+**CONTENT RULES:**
+
+1.  **Focus:** Concentrate on finding genuine bugs, security vulnerabilities, performance bottlenecks, and deviations from best practices.
+2.  **No Nitpicking:** Do not comment on trivial style preferences unless they violate a clear best practice.
+3.  **No Comment Suggestions:** IMPORTANT: NEVER suggest that the developer add more comments to their code.`;
+const singleFileLineRules = `**LINE NUMBERING RULES:**
+
+1.  **Target Added Lines Only:** You MUST only comment on lines that begin with a \`+\` in the diff. NEVER comment on lines starting with \`-\` or a space.
+2.  **1-Based Indexing:** The \`lineNumber\` MUST correspond to the line's position within the provided diff hunk. The first line of the hunk is 1, the second is 2, and so on.
+3.  **Example:** In the hunk below, you could only comment on lines 2, 4, or 5.
+    \`\`\`diff
+    1   - const oldVar = 1;
+    2   + const newVar = 2;
+    3     function doSomething() {
+    4   +   console.log('hello');
+    5   + }
+    \`\`\`
+    A comment on \`const newVar = 2;\` would have \`lineNumber: 2\`.`;
+const batchFileLineRules = `4.  **Cross-File Analysis:** Since you're reviewing multiple files, also look for inconsistencies between files, architectural issues, and patterns that span across files.
+
+**LINE NUMBERING RULES:**
+
+1.  **Target Added Lines Only:** You MUST only comment on lines that begin with a \`+\` in the diff. NEVER comment on lines starting with \`-\` or a space.
+2.  **Exact Line Matching:** The \`lineContent\` MUST be the EXACT line from the diff, including the \`+\` prefix and all whitespace.
+3.  **Multi-File Context:** When reviewing multiple files, ensure your \`lineContent\` exactly matches the line from the specific file you're commenting on.`;
+function createSingleReviewPrompt(context) {
+    return `${basePromptRules}
+
+${singleFileLineRules}
+
+**CONTEXT FOR THE REVIEW:**
+
+Review the following code diff in the context of the pull request details provided below.
+
+<PULL_REQUEST_TITLE>
+${context.title}
+</PULL_REQUEST_TITLE>
+
+<PULL_REQUEST_DESCRIPTION>
+${context.description}
+</PULL_REQUEST_DESCRIPTION>
+
+<FILE_PATH>
+${context.filePath}
+</FILE_PATH>
+
+<GIT_DIFF_HUNK_TO_REVIEW>
+\`\`\`diff
+${context.hunkContent}
+\`\`\`
+</GIT_DIFF_HUNK_TO_REVIEW>`;
+}
+function createBatchReviewPrompt(context) {
+    return `${basePromptRules}
+
+${batchFileLineRules}
+
+**CONTEXT FOR THE REVIEW:**
+
+Review the following code diffs for ${context.fileCount} files in the context of the pull request details provided below.
+
+<PULL_REQUEST_TITLE>
+${context.title}
+</PULL_REQUEST_TITLE>
+
+<PULL_REQUEST_DESCRIPTION>
+${context.description}
+</PULL_REQUEST_DESCRIPTION>
+
+<FILES_TO_REVIEW>
+${context.filesContent}
+</FILES_TO_REVIEW>`;
+}
+
+
+/***/ }),
+
 /***/ 3855:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -25334,27 +25430,20 @@ exports["default"] = parseDiff;
 /***/ }),
 
 /***/ 2004:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AIService = void 0;
-const node_fs_1 = __importDefault(__nccwpck_require__(3024));
-const node_path_1 = __importDefault(__nccwpck_require__(6760));
 const genai_1 = __nccwpck_require__(7002);
 const logger_1 = __nccwpck_require__(187);
-const helpers_1 = __nccwpck_require__(4482);
+const prompts_1 = __nccwpck_require__(1159);
 class AIService {
     genAi;
     currentModelName;
     rpmLimits;
     modelHierarchy;
-    promptTemplate = null;
-    batchPromptTemplate = null;
     lastRequestTime = 0;
     rateLimitDelay = 0;
     constructor(geminiApiKey, model) {
@@ -25397,44 +25486,6 @@ class AIService {
         logger_1.logger.info(`New rate limit: ${this.rpmLimits[this.currentModelName]} RPM (${this.rateLimitDelay}ms delay)`);
         return true;
     }
-    loadPromptTemplate() {
-        if (this.promptTemplate !== null) {
-            return this.promptTemplate;
-        }
-        try {
-            // Try bundled path first (config folder next to the bundled file)
-            let promptPath = node_path_1.default.join(__dirname, "config/prompt.txt");
-            // Fallback to development path if bundled path doesn't exist
-            if (!node_fs_1.default.existsSync(promptPath)) {
-                promptPath = node_path_1.default.join(__dirname, "../config/prompt.txt");
-            }
-            this.promptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
-            return this.promptTemplate;
-        }
-        catch (error) {
-            logger_1.logger.error("Error loading prompt template:", error);
-            throw new Error("Failed to load prompt template file");
-        }
-    }
-    loadBatchPromptTemplate() {
-        if (this.batchPromptTemplate !== null) {
-            return this.batchPromptTemplate;
-        }
-        try {
-            // Try bundled path first (config folder next to the bundled file)
-            let promptPath = node_path_1.default.join(__dirname, "config/batch-prompt.txt");
-            // Fallback to development path if bundled path doesn't exist
-            if (!node_fs_1.default.existsSync(promptPath)) {
-                promptPath = node_path_1.default.join(__dirname, "../config/batch-prompt.txt");
-            }
-            this.batchPromptTemplate = node_fs_1.default.readFileSync(promptPath, "utf8");
-            return this.batchPromptTemplate;
-        }
-        catch (error) {
-            logger_1.logger.warn("Batch prompt template not found, falling back to single prompt");
-            return this.loadPromptTemplate();
-        }
-    }
     async enforceRateLimit() {
         const now = Date.now();
         const timeSinceLastRequest = now - this.lastRequestTime;
@@ -25460,27 +25511,23 @@ class AIService {
         return aiResponses;
     }
     createBatchReviewPrompt(batch, prDetails) {
-        const template = this.loadBatchPromptTemplate();
         const filesContent = batch.files
             .map((file, index) => `File ${index + 1}: ${file.path}\n\`\`\`diff\n${file.content}\n\`\`\``)
             .join("\n\n");
-        const variables = {
+        return (0, prompts_1.createBatchReviewPrompt)({
             title: prDetails.title,
             description: prDetails.description || "No description provided",
             filesContent,
             fileCount: batch.files.length,
-        };
-        return (0, helpers_1.interpolate)(template, variables);
+        });
     }
     createSingleReviewPrompt(filePath, hunkContent, prDetails) {
-        const template = this.loadPromptTemplate();
-        const variables = {
+        return (0, prompts_1.createSingleReviewPrompt)({
             filePath,
             title: prDetails.title,
             description: prDetails.description || "No description provided",
             hunkContent,
-        };
-        return (0, helpers_1.interpolate)(template, variables);
+        });
     }
     async getAiResponse(prompt, isBatch, retryCount = 0) {
         const maxRetries = 3;
@@ -26060,14 +26107,6 @@ module.exports = require("node:events");
 
 "use strict";
 module.exports = require("node:fs");
-
-/***/ }),
-
-/***/ 6760:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("node:path");
 
 /***/ }),
 
@@ -48893,7 +48932,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.2","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.2","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

@@ -1,11 +1,12 @@
 {
   "name": "gemini-code-review-action",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "An AI code review GitHub Action using Google Gemini.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "ncc build src/code-review.ts -o dist --source-map --license licenses.txt && scripts/copy-prompts.sh dist",
-    "build:test": "ncc build src/test-code-review.ts -o build --source-map --license licenses.txt && scripts/copy-prompts.sh build",
+    "prebuild": "rm -rf dist",
+    "build": "ncc build src/code-review.ts -o dist --source-map --license licenses.txt",
+    "build:test": "ncc build src/test-code-review.ts -o build --source-map --license licenses.txt",
     "test:prod": "pnpm build:test && dotenv -e .env -- node ./build/index.js",
     "dev": "dotenv -e .env -- ts-node src/test-code-review.ts"
   },
