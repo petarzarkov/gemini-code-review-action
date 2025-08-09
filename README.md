@@ -23,7 +23,7 @@ name: "Code Review"
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, ready_for_review]
 
 # This is required for the action to be able to post comments on the PR.
 permissions:
@@ -52,6 +52,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
+
+> **Note**: The `ready_for_review` event type is important if you have `skip_draft_prs: true` (default). This ensures the action runs when a draft PR is marked as ready for review. You can remove this event type if you set `skip_draft_prs: false` and want to review draft PRs as well.
 
 ## How It Works
 
