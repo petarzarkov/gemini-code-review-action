@@ -18,6 +18,11 @@ inputs:
     required: false
     default: "true"
 
+  skip_draft_prs:
+    description: "Whether to skip code review for draft pull requests. When true, the action will not review draft PRs."
+    required: false
+    default: "true"
+
 runs:
   using: "node20"
   main: "dist/index.js"

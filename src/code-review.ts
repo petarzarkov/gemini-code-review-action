@@ -27,19 +27,22 @@ export class CodeReviewService {
   private readonly excludePatterns: string[];
 
   private readonly enableConversationContext: boolean;
+  private readonly skipDraftPrs: boolean;
 
   constructor(
     githubToken: string,
     geminiApiKey: string,
     excludePatterns: string[] = [],
     model?: string,
-    enableConversationContext: boolean = true
+    enableConversationContext: boolean = true,
+    skipDraftPrs: boolean = true
   ) {
     this.githubService = new GitHubService(githubToken);
     this.aiService = new AIService(geminiApiKey, model);
     this.batchProcessor = new BatchProcessor();
     this.excludePatterns = excludePatterns;
     this.enableConversationContext = enableConversationContext;
+    this.skipDraftPrs = skipDraftPrs;
   }
 
   public async processCodeReview(): Promise<void> {
@@ -49,6 +52,14 @@ export class CodeReviewService {
 
       if (eventName !== "pull_request") {
         logger.warn(`Unsupported event: ${eventName}`);
+        return;
+      }
+
+      // Check if PR is draft and should be skipped
+      if (this.skipDraftPrs && this.githubService.isPullRequestDraft()) {
+        logger.info(
+          "Pull request is a draft and skip_draft_prs is enabled, skipping review"
+        );
         return;
       }
 
@@ -320,6 +331,8 @@ async function main(): Promise<void> {
       (
         process.env.INPUT_ENABLE_CONVERSATION_CONTEXT || "true"
       ).toLowerCase() === "true";
+    const skipDraftPrs =
+      (process.env.INPUT_SKIP_DRAFT_PRS || "true").toLowerCase() === "true";
 
     if (!githubToken) {
       throw new Error("GITHUB_TOKEN environment variable is required");
@@ -335,6 +348,8 @@ async function main(): Promise<void> {
         pkg.version
       }) with model: ${model}, conversation context: ${
         enableConversationContext ? "enabled" : "disabled"
+      }, skip draft PRs: ${
+        skipDraftPrs ? "enabled" : "disabled"
       }, exclude patterns: ${excludePatterns.join(", ")}`
     );
 
@@ -343,7 +358,8 @@ async function main(): Promise<void> {
       geminiApiKey,
       excludePatterns,
       model,
-      enableConversationContext
+      enableConversationContext,
+      skipDraftPrs
     );
     await codeReviewService.processCodeReview();
 

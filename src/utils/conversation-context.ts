@@ -15,7 +15,9 @@ export function summarizeConversationContext(
     const reviewSummary = context.previousReviews
       .slice(-3) // Only include last 3 reviews to avoid token limit
       .map((review, index) => {
-        const date = new Date(review.createdAt).toLocaleDateString();
+        const date = new Date(
+          review.submitted_at || new Date().toISOString()
+        ).toLocaleDateString();
         const cleanBody = review.body
           .replace(/<!--.*?-->/gs, "") // Remove HTML comments
           .replace(/\[.*?\]/g, "") // Remove markdown links
@@ -78,13 +80,15 @@ export function summarizeConversationContext(
     const historyPreview = context.conversationHistory
       .slice(-2) // Last 2 conversation entries
       .map((entry, index) => {
-        const date = new Date(entry.createdAt).toLocaleDateString();
-        const cleanBody = entry.body
-          .replace(/<!--.*?-->/gs, "") // Remove HTML comments
-          .replace(/###.*$/gm, "") // Remove headers
-          .replace(/---.*$/gm, "") // Remove separators
-          .replace(/\*This comment.*$/gm, "") // Remove footer text
-          .trim();
+        const date = new Date(entry.created_at).toLocaleDateString();
+        const cleanBody =
+          entry.body ||
+          ""
+            .replace(/<!--.*?-->/gs, "") // Remove HTML comments
+            .replace(/###.*$/gm, "") // Remove headers
+            .replace(/---.*$/gm, "") // Remove separators
+            .replace(/\*This comment.*$/gm, "") // Remove footer text
+            .trim();
 
         const preview =
           cleanBody.length > 150
@@ -184,15 +188,15 @@ function getLastActivityDate(context: ConversationContext): Date | null {
   const dates: Date[] = [];
 
   context.previousReviews.forEach((review) => {
-    dates.push(new Date(review.updatedAt || review.createdAt));
+    dates.push(new Date(review.submitted_at || new Date().toISOString()));
   });
 
   context.previousComments.forEach((comment) => {
-    dates.push(new Date(comment.updatedAt || comment.createdAt));
+    dates.push(new Date(comment.updated_at || comment.created_at));
   });
 
   context.conversationHistory.forEach((entry) => {
-    dates.push(new Date(entry.createdAt));
+    dates.push(new Date(entry.updated_at || entry.created_at));
   });
 
   if (dates.length === 0) {

@@ -1,10 +1,10 @@
 import {
   FileData,
   HunkData,
-  ReviewComment,
   AiReviewResponse,
   BatchReviewRequest,
   BatchFileContent,
+  ReviewComment,
 } from "../types/code-review";
 import { logger } from "../utils/logger";
 

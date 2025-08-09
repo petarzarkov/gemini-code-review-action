@@ -25098,12 +25098,14 @@ class CodeReviewService {
     batchProcessor;
     excludePatterns;
     enableConversationContext;
-    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true) {
+    skipDraftPrs;
+    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true, skipDraftPrs = true) {
         this.githubService = new github_service_1.GitHubService(githubToken);
         this.aiService = new ai_service_1.AIService(geminiApiKey, model);
         this.batchProcessor = new batch_processor_1.BatchProcessor();
         this.excludePatterns = excludePatterns;
         this.enableConversationContext = enableConversationContext;
+        this.skipDraftPrs = skipDraftPrs;
     }
     async processCodeReview() {
         try {
@@ -25111,6 +25113,11 @@ class CodeReviewService {
             const eventName = process.env.GITHUB_EVENT_NAME;
             if (eventName !== "pull_request") {
                 logger_1.logger.warn(`Unsupported event: ${eventName}`);
+                return;
+            }
+            // Check if PR is draft and should be skipped
+            if (this.skipDraftPrs && this.githubService.isPullRequestDraft()) {
+                logger_1.logger.info("Pull request is a draft and skip_draft_prs is enabled, skipping review");
                 return;
             }
             // Retrieve conversation context for continuing the discussion (if enabled)
@@ -25257,6 +25264,7 @@ async function main() {
         const excludeInput = process.env.INPUT_EXCLUDE || "";
         const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
         const enableConversationContext = (process.env.INPUT_ENABLE_CONVERSATION_CONTEXT || "true").toLowerCase() === "true";
+        const skipDraftPrs = (process.env.INPUT_SKIP_DRAFT_PRS || "true").toLowerCase() === "true";
         if (!githubToken) {
             throw new Error("GITHUB_TOKEN environment variable is required");
         }
@@ -25264,8 +25272,8 @@ async function main() {
             throw new Error("GEMINI_API_KEY environment variable is required");
         }
         const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
-        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, conversation context: ${enableConversationContext ? "enabled" : "disabled"}, exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext);
+        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, conversation context: ${enableConversationContext ? "enabled" : "disabled"}, skip draft PRs: ${skipDraftPrs ? "enabled" : "disabled"}, exclude patterns: ${excludePatterns.join(", ")}`);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext, skipDraftPrs);
         await codeReviewService.processCodeReview();
         logger_1.logger.success("✨ Code Review completed successfully!");
     }
@@ -26014,6 +26022,10 @@ class GitHubService {
         const eventData = JSON.parse(node_fs_1.default.readFileSync(eventPath, "utf8"));
         return eventData;
     }
+    isPullRequestDraft() {
+        const eventData = this.getEventData();
+        return eventData.pull_request?.draft ?? false;
+    }
     async getPullRequestDiff(owner, repo, pullNumber) {
         try {
             logger_1.logger.processing(`Fetching diff for ${owner}/${repo} PR#${pullNumber}`);
@@ -26042,11 +26054,7 @@ class GitHubService {
                 repo,
                 pull_number: pullNumber,
                 body: `${package_json_1.default.name} comments`,
-                comments: comments.map((comment) => ({
-                    path: comment.path,
-                    position: comment.position,
-                    body: comment.body,
-                })),
+                comments,
                 event: "COMMENT",
             });
             logger_1.logger.success("Review created successfully");
@@ -26085,27 +26093,9 @@ class GitHubService {
             const actionIssueComments = issueComments.data.filter((comment) => comment.user?.login === "github-actions[bot]" &&
                 comment.body?.includes(`<!-- [${package_json_1.default.name}:context] -->`));
             const context = {
-                previousReviews: actionReviews.map((review) => ({
-                    id: review.id,
-                    body: review.body || "",
-                    createdAt: review.submitted_at || new Date().toISOString(),
-                    updatedAt: review.submitted_at || new Date().toISOString(),
-                })),
-                previousComments: actionComments.map((comment) => ({
-                    id: comment.id,
-                    body: comment.body || "",
-                    path: comment.path,
-                    line: comment.original_line || comment.line || 0,
-                    createdAt: comment.created_at || new Date().toISOString(),
-                    updatedAt: comment.updated_at ||
-                        comment.created_at ||
-                        new Date().toISOString(),
-                })),
-                conversationHistory: actionIssueComments.map((comment) => ({
-                    id: comment.id,
-                    body: comment.body || "",
-                    createdAt: comment.created_at || new Date().toISOString(),
-                })),
+                previousReviews: actionReviews,
+                previousComments: actionComments,
+                conversationHistory: actionIssueComments,
             };
             logger_1.logger.info(`Retrieved context: ${context.previousReviews.length} reviews, ` +
                 `${context.previousComments.length} comments, ` +
@@ -26199,7 +26189,7 @@ function summarizeConversationContext(context) {
         const reviewSummary = context.previousReviews
             .slice(-3) // Only include last 3 reviews to avoid token limit
             .map((review, index) => {
-            const date = new Date(review.createdAt).toLocaleDateString();
+            const date = new Date(review.submitted_at || new Date().toISOString()).toLocaleDateString();
             const cleanBody = review.body
                 .replace(/<!--.*?-->/gs, "") // Remove HTML comments
                 .replace(/\[.*?\]/g, "") // Remove markdown links
@@ -26245,13 +26235,14 @@ function summarizeConversationContext(context) {
         const historyPreview = context.conversationHistory
             .slice(-2) // Last 2 conversation entries
             .map((entry, index) => {
-            const date = new Date(entry.createdAt).toLocaleDateString();
-            const cleanBody = entry.body
-                .replace(/<!--.*?-->/gs, "") // Remove HTML comments
-                .replace(/###.*$/gm, "") // Remove headers
-                .replace(/---.*$/gm, "") // Remove separators
-                .replace(/\*This comment.*$/gm, "") // Remove footer text
-                .trim();
+            const date = new Date(entry.created_at).toLocaleDateString();
+            const cleanBody = entry.body ||
+                ""
+                    .replace(/<!--.*?-->/gs, "") // Remove HTML comments
+                    .replace(/###.*$/gm, "") // Remove headers
+                    .replace(/---.*$/gm, "") // Remove separators
+                    .replace(/\*This comment.*$/gm, "") // Remove footer text
+                    .trim();
             const preview = cleanBody.length > 150
                 ? cleanBody.substring(0, 150) + "..."
                 : cleanBody;
@@ -26316,13 +26307,13 @@ function shouldIncludeContext(context) {
 function getLastActivityDate(context) {
     const dates = [];
     context.previousReviews.forEach((review) => {
-        dates.push(new Date(review.updatedAt || review.createdAt));
+        dates.push(new Date(review.submitted_at || new Date().toISOString()));
     });
     context.previousComments.forEach((comment) => {
-        dates.push(new Date(comment.updatedAt || comment.createdAt));
+        dates.push(new Date(comment.updated_at || comment.created_at));
     });
     context.conversationHistory.forEach((entry) => {
-        dates.push(new Date(entry.createdAt));
+        dates.push(new Date(entry.updated_at || entry.created_at));
     });
     if (dates.length === 0) {
         return null;
@@ -49453,7 +49444,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.8","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.9","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

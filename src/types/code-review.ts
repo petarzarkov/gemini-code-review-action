@@ -1,3 +1,5 @@
+import { RestEndpointMethodTypes } from "@octokit/rest";
+
 export interface PullRequestDetails {
   owner: string;
   repo: string;
@@ -16,32 +18,24 @@ export interface FileData {
   hunks: HunkData[];
 }
 
-export interface ReviewComment {
-  body: string;
-  path: string;
-  position: number;
-}
+export type ReviewCommentData =
+  RestEndpointMethodTypes["pulls"]["listReviewComments"]["response"]["data"][number];
+
+export type ReviewData =
+  RestEndpointMethodTypes["pulls"]["listReviews"]["response"]["data"][number];
+
+export type CommentData =
+  RestEndpointMethodTypes["issues"]["listComments"]["response"]["data"][number];
+
+export type ReviewComment = Exclude<
+  RestEndpointMethodTypes["pulls"]["createReview"]["parameters"]["comments"],
+  undefined
+>[number];
 
 export interface ConversationContext {
-  previousReviews: Array<{
-    id: number;
-    body: string;
-    createdAt: string;
-    updatedAt: string;
-  }>;
-  previousComments: Array<{
-    id: number;
-    body: string;
-    path: string;
-    line: number;
-    createdAt: string;
-    updatedAt: string;
-  }>;
-  conversationHistory: Array<{
-    id: number;
-    body: string;
-    createdAt: string;
-  }>;
+  previousReviews: ReviewData[];
+  previousComments: ReviewCommentData[];
+  conversationHistory: CommentData[];
 }
 
 export interface AiReviewResponse {
@@ -78,5 +72,6 @@ export interface GitHubEventData {
     title: string;
     body: string;
     number: number;
+    draft: boolean;
   };
 }

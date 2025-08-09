@@ -45,6 +45,11 @@ export class GitHubService {
     return eventData as GitHubEventData;
   }
 
+  public isPullRequestDraft(): boolean {
+    const eventData = this.getEventData();
+    return eventData.pull_request?.draft ?? false;
+  }
+
   public async getPullRequestDiff(
     owner: string,
     repo: string,
@@ -85,11 +90,7 @@ export class GitHubService {
         repo,
         pull_number: pullNumber,
         body: `${pkg.name} comments`,
-        comments: comments.map((comment) => ({
-          path: comment.path,
-          position: comment.position,
-          body: comment.body,
-        })),
+        comments,
         event: "COMMENT",
       });
 
@@ -149,28 +150,9 @@ export class GitHubService {
       );
 
       const context: ConversationContext = {
-        previousReviews: actionReviews.map((review) => ({
-          id: review.id,
-          body: review.body || "",
-          createdAt: review.submitted_at || new Date().toISOString(),
-          updatedAt: review.submitted_at || new Date().toISOString(),
-        })),
-        previousComments: actionComments.map((comment) => ({
-          id: comment.id,
-          body: comment.body || "",
-          path: comment.path,
-          line: comment.original_line || comment.line || 0,
-          createdAt: comment.created_at || new Date().toISOString(),
-          updatedAt:
-            comment.updated_at ||
-            comment.created_at ||
-            new Date().toISOString(),
-        })),
-        conversationHistory: actionIssueComments.map((comment) => ({
-          id: comment.id,
-          body: comment.body || "",
-          createdAt: comment.created_at || new Date().toISOString(),
-        })),
+        previousReviews: actionReviews,
+        previousComments: actionComments,
+        conversationHistory: actionIssueComments,
       };
 
       logger.info(
