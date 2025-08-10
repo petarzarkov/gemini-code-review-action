@@ -5,6 +5,7 @@ import {
   GitHubEventData,
   ReviewComment,
   ConversationContext,
+  CommitData,
 } from "../types/code-review";
 import { logger } from "../utils/logger";
 import pkg from "../../package.json";
@@ -101,6 +102,28 @@ export class GitHubService {
     }
   }
 
+  public async getPullRequestCommits(
+    owner: string,
+    repo: string,
+    pullNumber: number
+  ): Promise<CommitData[]> {
+    try {
+      logger.processing(`Fetching commits for PR #${pullNumber}`);
+
+      const response = await this.octokit.pulls.listCommits({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      });
+
+      logger.debug(`Retrieved ${response.data.length} commits`);
+      return response.data;
+    } catch (error) {
+      logger.error("Failed to get pull request commits:", error);
+      return [];
+    }
+  }
+
   public async getConversationContext(
     owner: string,
     repo: string,
@@ -111,8 +134,8 @@ export class GitHubService {
         `Retrieving conversation context for PR #${pullNumber}`
       );
 
-      // Get existing reviews and comments from this action
-      const [reviews, comments] = await Promise.all([
+      // Get existing reviews, comments, and commits from this PR
+      const [reviews, comments, commits] = await Promise.all([
         this.octokit.pulls.listReviews({
           owner,
           repo,
@@ -123,6 +146,7 @@ export class GitHubService {
           repo,
           pull_number: pullNumber,
         }),
+        this.getPullRequestCommits(owner, repo, pullNumber),
       ]);
 
       // Filter for comments made by this action
@@ -153,12 +177,14 @@ export class GitHubService {
         previousReviews: actionReviews,
         previousComments: actionComments,
         conversationHistory: actionIssueComments,
+        commits: commits,
       };
 
       logger.info(
         `Retrieved context: ${context.previousReviews.length} reviews, ` +
           `${context.previousComments.length} comments, ` +
-          `${context.conversationHistory.length} conversation entries`
+          `${context.conversationHistory.length} conversation entries, ` +
+          `${context.commits.length} commits`
       );
 
       return context;
@@ -169,6 +195,7 @@ export class GitHubService {
         previousReviews: [],
         previousComments: [],
         conversationHistory: [],
+        commits: [],
       };
     }
   }
@@ -189,7 +216,7 @@ export class GitHubService {
           : `This PR has been reviewed ${reviewCount} times`;
 
       const contextComment = `<!-- [${pkg.name}:context] -->
-### 🔄 Conversation Context Updated
+### 🔄 Conversation Context Updated ${new Date().toUTCString()}
 
 ${reviewText}. Here's a summary of the ongoing conversation:
 

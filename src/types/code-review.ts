@@ -32,10 +32,14 @@ export type ReviewComment = Exclude<
   undefined
 >[number];
 
+export type CommitData =
+  RestEndpointMethodTypes["pulls"]["listCommits"]["response"]["data"][number];
+
 export interface ConversationContext {
   previousReviews: ReviewData[];
   previousComments: ReviewCommentData[];
   conversationHistory: CommentData[];
+  commits: CommitData[];
 }
 
 export interface AiReviewResponse {

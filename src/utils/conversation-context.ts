@@ -121,6 +121,29 @@ export function createContextSummary(
 ): string {
   const parts: string[] = [];
 
+  // Add commit information
+  if (context.commits.length > 0) {
+    const latestCommit = context.commits[context.commits.length - 1];
+    const commitDate = new Date(
+      latestCommit.commit.author?.date || new Date().toISOString()
+    );
+    const commitHash = latestCommit.sha.substring(0, 7);
+    const commitSubject = latestCommit.commit.message.split("\n")[0];
+    const authorName = latestCommit.commit.author?.name || "Unknown";
+
+    parts.push(
+      `📝 **Latest Commit**: \`${commitHash}\` - ${commitSubject} by ${authorName} (${commitDate.toLocaleDateString()})`
+    );
+
+    if (context.commits.length > 1) {
+      parts.push(
+        `📦 **Total Commits**: ${context.commits.length} commit${
+          context.commits.length > 1 ? "s" : ""
+        } in this PR`
+      );
+    }
+  }
+
   if (context.previousReviews.length > 0) {
     parts.push(
       `📋 **Review History**: ${
@@ -199,6 +222,12 @@ function getLastActivityDate(context: ConversationContext): Date | null {
     dates.push(new Date(entry.updated_at || entry.created_at));
   });
 
+  context.commits.forEach((commit) => {
+    if (commit.commit.author?.date) {
+      dates.push(new Date(commit.commit.author.date));
+    }
+  });
+
   if (dates.length === 0) {
     return null;
   }
@@ -214,6 +243,7 @@ export function logContextStats(context: ConversationContext): void {
     reviews: context.previousReviews.length,
     comments: context.previousComments.length,
     conversations: context.conversationHistory.length,
+    commits: context.commits.length,
     shouldInclude: shouldIncludeContext(context),
     lastActivity: getLastActivityDate(context)?.toISOString() || "none",
   };

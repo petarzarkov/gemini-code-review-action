@@ -26064,11 +26064,27 @@ class GitHubService {
             throw error;
         }
     }
+    async getPullRequestCommits(owner, repo, pullNumber) {
+        try {
+            logger_1.logger.processing(`Fetching commits for PR #${pullNumber}`);
+            const response = await this.octokit.pulls.listCommits({
+                owner,
+                repo,
+                pull_number: pullNumber,
+            });
+            logger_1.logger.debug(`Retrieved ${response.data.length} commits`);
+            return response.data;
+        }
+        catch (error) {
+            logger_1.logger.error("Failed to get pull request commits:", error);
+            return [];
+        }
+    }
     async getConversationContext(owner, repo, pullNumber) {
         try {
             logger_1.logger.processing(`Retrieving conversation context for PR #${pullNumber}`);
-            // Get existing reviews and comments from this action
-            const [reviews, comments] = await Promise.all([
+            // Get existing reviews, comments, and commits from this PR
+            const [reviews, comments, commits] = await Promise.all([
                 this.octokit.pulls.listReviews({
                     owner,
                     repo,
@@ -26079,6 +26095,7 @@ class GitHubService {
                     repo,
                     pull_number: pullNumber,
                 }),
+                this.getPullRequestCommits(owner, repo, pullNumber),
             ]);
             // Filter for comments made by this action
             const actionReviews = reviews.data.filter((review) => review.body?.includes(package_json_1.default.name) &&
@@ -26096,10 +26113,12 @@ class GitHubService {
                 previousReviews: actionReviews,
                 previousComments: actionComments,
                 conversationHistory: actionIssueComments,
+                commits: commits,
             };
             logger_1.logger.info(`Retrieved context: ${context.previousReviews.length} reviews, ` +
                 `${context.previousComments.length} comments, ` +
-                `${context.conversationHistory.length} conversation entries`);
+                `${context.conversationHistory.length} conversation entries, ` +
+                `${context.commits.length} commits`);
             return context;
         }
         catch (error) {
@@ -26109,6 +26128,7 @@ class GitHubService {
                 previousReviews: [],
                 previousComments: [],
                 conversationHistory: [],
+                commits: [],
             };
         }
     }
@@ -26119,7 +26139,7 @@ class GitHubService {
                 ? "This PR has been reviewed for the first time"
                 : `This PR has been reviewed ${reviewCount} times`;
             const contextComment = `<!-- [${package_json_1.default.name}:context] -->
-### 🔄 Conversation Context Updated
+### 🔄 Conversation Context Updated ${new Date().toUTCString()}
 
 ${reviewText}. Here's a summary of the ongoing conversation:
 
@@ -26262,6 +26282,18 @@ function summarizeConversationContext(context) {
  */
 function createContextSummary(context, currentReviewSummary) {
     const parts = [];
+    // Add commit information
+    if (context.commits.length > 0) {
+        const latestCommit = context.commits[context.commits.length - 1];
+        const commitDate = new Date(latestCommit.commit.author?.date || new Date().toISOString());
+        const commitHash = latestCommit.sha.substring(0, 7);
+        const commitSubject = latestCommit.commit.message.split("\n")[0];
+        const authorName = latestCommit.commit.author?.name || "Unknown";
+        parts.push(`📝 **Latest Commit**: \`${commitHash}\` - ${commitSubject} by ${authorName} (${commitDate.toLocaleDateString()})`);
+        if (context.commits.length > 1) {
+            parts.push(`📦 **Total Commits**: ${context.commits.length} commit${context.commits.length > 1 ? "s" : ""} in this PR`);
+        }
+    }
     if (context.previousReviews.length > 0) {
         parts.push(`📋 **Review History**: ${context.previousReviews.length} previous review${context.previousReviews.length > 1 ? "s" : ""}`);
     }
@@ -26315,6 +26347,11 @@ function getLastActivityDate(context) {
     context.conversationHistory.forEach((entry) => {
         dates.push(new Date(entry.updated_at || entry.created_at));
     });
+    context.commits.forEach((commit) => {
+        if (commit.commit.author?.date) {
+            dates.push(new Date(commit.commit.author.date));
+        }
+    });
     if (dates.length === 0) {
         return null;
     }
@@ -26328,6 +26365,7 @@ function logContextStats(context) {
         reviews: context.previousReviews.length,
         comments: context.previousComments.length,
         conversations: context.conversationHistory.length,
+        commits: context.commits.length,
         shouldInclude: shouldIncludeContext(context),
         lastActivity: getLastActivityDate(context)?.toISOString() || "none",
     };
@@ -49444,7 +49482,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.0.9","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 
