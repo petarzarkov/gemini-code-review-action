@@ -38,9 +38,7 @@ export class AIService {
       "gemini-2.0-flash-lite": 30,
     };
 
-    this.modelHierarchy = Object.keys(this.rpmLimits).sort(
-      (a, b) => this.rpmLimits[b] - this.rpmLimits[a]
-    );
+    this.modelHierarchy = Object.keys(this.rpmLimits);
 
     this.updateRateLimitDelay();
 
