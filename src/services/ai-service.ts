@@ -1,13 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
+import { PullRequestDetails } from "../types/github";
 import {
-  PullRequestDetails,
-  FileData,
   AiReviewResponse,
   AiResponseData,
   BatchReviewRequest,
   BatchAiResponseData,
-  ConversationContext,
-} from "../types/code-review";
+} from "../types/ai";
+import { ConversationContext } from "../types/conversation";
 import { logger } from "../utils/logger";
 import {
   createSingleReviewPrompt,
@@ -203,7 +202,7 @@ export class AIService {
       await this.enforceRateLimit();
 
       const generationConfig = {
-        maxOutputTokens: isBatch ? 16384 : 8192, // Increase token limit for batch requests
+        maxOutputTokens: isBatch ? 16384 : 8192,
         temperature: 0.8,
         topP: 0.95,
       };
@@ -220,9 +219,25 @@ export class AIService {
         config: generationConfig,
       });
 
-      let responseText = result.text?.trim();
+      // Extract text from candidates array - Gemini response structure
+      let responseText: string | undefined;
+      if (result.candidates && result.candidates.length > 0) {
+        const candidate = result.candidates[0];
+        if (candidate.content?.parts && candidate.content.parts.length > 0) {
+          responseText = candidate.content.parts[0].text?.trim();
+        }
+      }
+
+      // Fallback to result.text for backward compatibility
       if (!responseText) {
-        logger.warn("No response text received from AI");
+        responseText = result.text?.trim();
+      }
+
+      if (!responseText) {
+        logger.warn(
+          "No response text received from AI",
+          "candidates" in result ? JSON.stringify(result.candidates) : result
+        );
         return [];
       }
 
@@ -257,34 +272,50 @@ export class AIService {
         error
       );
 
-      // Check if it's a rate limit error and retry with exponential backoff or deranking
+      // Check if it's a retryable error (rate limit or server error)
       if (
         error &&
         typeof error === "object" &&
         "status" in error &&
-        error.status === 429
+        (error.status === 429 ||
+          error.status === 500 ||
+          error.status === 502 ||
+          error.status === 503)
       ) {
         if (retryCount < maxRetries) {
-          // Try deranking to a lower model first
-          if (retryCount === 0 && this.derankModel()) {
+          // For rate limit errors, try deranking to a lower model first
+          if (error.status === 429 && retryCount === 0 && this.derankModel()) {
             logger.info(
               `Retrying with deranked model: ${this.currentModelName}`
             );
             return this.getAiResponse(prompt, isBatch, retryCount + 1);
           }
 
-          // Fall back to exponential backoff if deranking not possible or already tried
+          // Fall back to exponential backoff for all retryable errors
           const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+          const errorType =
+            error.status === 429 ? "Rate limit" : "Server error";
           logger.warn(
-            `Rate limit exceeded. Retrying in ${backoffDelay}ms... (${
+            `${errorType} (${
+              error.status
+            }). Retrying in ${backoffDelay}ms... (${
               retryCount + 1
             }/${maxRetries})`
           );
           await new Promise((resolve) => setTimeout(resolve, backoffDelay));
           return this.getAiResponse(prompt, isBatch, retryCount + 1);
         } else {
-          logger.error("Max retries exceeded. Skipping this request.");
+          const errorType =
+            error.status === 429 ? "rate limit" : "server error";
+          logger.error(
+            `Max retries exceeded for ${errorType}. Skipping this request.`
+          );
         }
+      } else if (error && typeof error === "object" && "status" in error) {
+        // Log non-retryable errors with their status codes
+        logger.error(
+          `Non-retryable error (${error.status}). Skipping this request.`
+        );
       }
 
       return [];

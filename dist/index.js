@@ -25086,24 +25086,26 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.CodeReviewService = void 0;
 const ai_service_1 = __nccwpck_require__(2004);
-const github_service_1 = __nccwpck_require__(8221);
+const index_1 = __nccwpck_require__(9380);
 const batch_processor_1 = __nccwpck_require__(7951);
+const file_filter_service_1 = __nccwpck_require__(71);
+const code_analysis_service_1 = __nccwpck_require__(6266);
 const logger_1 = __nccwpck_require__(187);
 const helpers_1 = __nccwpck_require__(4482);
 const conversation_context_1 = __nccwpck_require__(2354);
 const package_json_1 = __importDefault(__nccwpck_require__(8330));
 class CodeReviewService {
     githubService;
-    aiService;
-    batchProcessor;
-    excludePatterns;
+    fileFilterService;
+    codeAnalysisService;
     enableConversationContext;
     skipDraftPrs;
     constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true, skipDraftPrs = true) {
-        this.githubService = new github_service_1.GitHubService(githubToken);
-        this.aiService = new ai_service_1.AIService(geminiApiKey, model);
-        this.batchProcessor = new batch_processor_1.BatchProcessor();
-        this.excludePatterns = excludePatterns;
+        this.githubService = new index_1.GitHubService(githubToken);
+        this.fileFilterService = new file_filter_service_1.FileFilterService(excludePatterns);
+        const aiService = new ai_service_1.AIService(geminiApiKey, model);
+        const batchProcessor = new batch_processor_1.BatchProcessor();
+        this.codeAnalysisService = new code_analysis_service_1.CodeAnalysisService(aiService, batchProcessor);
         this.enableConversationContext = enableConversationContext;
         this.skipDraftPrs = skipDraftPrs;
     }
@@ -25135,11 +25137,21 @@ class CodeReviewService {
                 return;
             }
             const parsedDiff = (0, helpers_1.parseDiffToFileData)(diff);
-            const filteredDiff = this.filterFilesByExcludePatterns(parsedDiff);
+            let filteredDiff = this.fileFilterService.filterFilesByExcludePatterns(parsedDiff);
+            // Filter out resolved code sections if conversation context is enabled
+            if (this.enableConversationContext &&
+                conversationContext?.resolvedComments) {
+                const beforeCount = filteredDiff.reduce((acc, file) => acc + file.hunks.length, 0);
+                filteredDiff = (0, conversation_context_1.filterResolvedCodeSections)(filteredDiff, conversationContext.resolvedComments);
+                const afterCount = filteredDiff.reduce((acc, file) => acc + file.hunks.length, 0);
+                if (beforeCount > afterCount) {
+                    logger_1.logger.info(`Filtered out ${beforeCount - afterCount} resolved code hunks`);
+                }
+            }
             logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
                 .map((f) => f.path)
                 .join(", ")}`);
-            const comments = await this.analyzeCodeChanges(filteredDiff, prDetails, conversationContext);
+            const comments = await this.codeAnalysisService.analyzeCodeChanges(filteredDiff, prDetails, conversationContext);
             if (comments.length > 0) {
                 await this.githubService.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
                 logger_1.logger.success(`Created ${comments.length} review comments`);
@@ -25167,93 +25179,6 @@ class CodeReviewService {
             logger_1.logger.error("Error in code review process:", error);
             throw error;
         }
-    }
-    filterFilesByExcludePatterns(files) {
-        if (this.excludePatterns.length === 0) {
-            return files;
-        }
-        return files.filter((file) => {
-            const shouldExclude = this.excludePatterns.some((pattern) => (0, helpers_1.matchesPattern)(file.path, pattern));
-            if (shouldExclude) {
-                logger_1.logger.debug(`Excluding file: ${file.path}`);
-                return false;
-            }
-            return true;
-        });
-    }
-    async analyzeCodeChanges(files, prDetails, conversationContext) {
-        logger_1.logger.processing(`Starting analysis of ${files.length} files`);
-        // Decide whether to use batch processing or individual file processing
-        if (this.batchProcessor.shouldUseBatching(files)) {
-            return this.analyzeBatchMode(files, prDetails, conversationContext);
-        }
-        else {
-            return this.analyzeIndividualMode(files, prDetails, conversationContext);
-        }
-    }
-    async analyzeBatchMode(files, prDetails, conversationContext) {
-        logger_1.logger.info("Using batch processing mode for performance optimization");
-        const batches = this.batchProcessor.createBatches(files);
-        const allComments = [];
-        for (let i = 0; i < batches.length; i++) {
-            const batch = batches[i];
-            logger_1.logger.processing(`Processing batch ${i + 1}/${batches.length} (${batch.files.length} files)`);
-            try {
-                const aiResponses = await this.aiService.reviewBatch(batch, prDetails, conversationContext);
-                const comments = this.batchProcessor.createCommentsFromBatchResponse(batch, aiResponses);
-                allComments.push(...comments);
-                logger_1.logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
-            }
-            catch (error) {
-                logger_1.logger.error(`Error processing batch ${i + 1}:`, error);
-                // Fallback: try individual file processing for this batch
-                logger_1.logger.info(`Falling back to individual processing for batch ${i + 1}`);
-                const fallbackComments = await this.processBatchFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails, conversationContext);
-                allComments.push(...fallbackComments);
-            }
-        }
-        logger_1.logger.success(`Batch processing generated ${allComments.length} total comments`);
-        return allComments;
-    }
-    async analyzeIndividualMode(files, prDetails, conversationContext) {
-        logger_1.logger.info("Using individual file processing mode");
-        return this.processBatchFilesIndividually(files, prDetails, conversationContext);
-    }
-    async processBatchFilesIndividually(files, prDetails, conversationContext) {
-        const allComments = [];
-        let hunkCount = 0;
-        let totalHunks = 0;
-        // Count total hunks for progress tracking
-        for (const file of files) {
-            if (file.path && file.path !== "/dev/null") {
-                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
-            }
-        }
-        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
-        for (const file of files) {
-            logger_1.logger.info(`Processing file: ${file.path}`);
-            if (!file.path || file.path === "/dev/null") {
-                continue;
-            }
-            for (const hunk of file.hunks) {
-                if (hunk.lines.length === 0) {
-                    continue;
-                }
-                hunkCount++;
-                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
-                try {
-                    const hunkContent = hunk.lines.join("\n");
-                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails, conversationContext);
-                    const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
-                    allComments.push(...comments);
-                }
-                catch (error) {
-                    logger_1.logger.error(`Error processing hunk ${hunkCount}:`, error);
-                }
-            }
-        }
-        logger_1.logger.success(`Individual processing generated ${allComments.length} comments`);
-        return allComments;
     }
 }
 exports.CodeReviewService = CodeReviewService;
@@ -25312,7 +25237,8 @@ const basePromptRules = `You are an expert senior software engineer acting as a 
 
 1.  **Focus:** Concentrate on finding genuine bugs, security vulnerabilities, performance bottlenecks, and deviations from best practices.
 2.  **No Nitpicking:** Do not comment on trivial style preferences unless they violate a clear best practice.
-3.  **No Comment Suggestions:** IMPORTANT: NEVER suggest that the developer add more comments to their code.`;
+3.  **No Comment Suggestions:** IMPORTANT: NEVER suggest that the developer add more comments to their code.
+4.  **Resolved Issues:** If conversation context shows resolved issues, do NOT review those same code sections again unless there are new changes. Focus only on unresolved or newly introduced code.`;
 const singleFileLineRules = `**LINE NUMBERING RULES:**
 
 1.  **Target Added Lines Only:** You MUST only comment on lines that begin with a \`+\` in the diff. NEVER comment on lines starting with \`-\` or a space.
@@ -25779,7 +25705,7 @@ class AIService {
         try {
             await this.enforceRateLimit();
             const generationConfig = {
-                maxOutputTokens: isBatch ? 16384 : 8192, // Increase token limit for batch requests
+                maxOutputTokens: isBatch ? 16384 : 8192,
                 temperature: 0.8,
                 topP: 0.95,
             };
@@ -25789,9 +25715,20 @@ class AIService {
                 model: this.currentModelName,
                 config: generationConfig,
             });
-            let responseText = result.text?.trim();
+            // Extract text from candidates array - Gemini response structure
+            let responseText;
+            if (result.candidates && result.candidates.length > 0) {
+                const candidate = result.candidates[0];
+                if (candidate.content?.parts && candidate.content.parts.length > 0) {
+                    responseText = candidate.content.parts[0].text?.trim();
+                }
+            }
+            // Fallback to result.text for backward compatibility
             if (!responseText) {
-                logger_1.logger.warn("No response text received from AI");
+                responseText = result.text?.trim();
+            }
+            if (!responseText) {
+                logger_1.logger.warn("No response text received from AI", "candidates" in result ? JSON.stringify(result.candidates) : result);
                 return [];
             }
             // Clean up response text
@@ -25812,26 +25749,35 @@ class AIService {
         }
         catch (error) {
             logger_1.logger.error(`Error calling Gemini AI (attempt ${retryCount + 1}):`, error);
-            // Check if it's a rate limit error and retry with exponential backoff or deranking
+            // Check if it's a retryable error (rate limit or server error)
             if (error &&
                 typeof error === "object" &&
                 "status" in error &&
-                error.status === 429) {
+                (error.status === 429 ||
+                    error.status === 500 ||
+                    error.status === 502 ||
+                    error.status === 503)) {
                 if (retryCount < maxRetries) {
-                    // Try deranking to a lower model first
-                    if (retryCount === 0 && this.derankModel()) {
+                    // For rate limit errors, try deranking to a lower model first
+                    if (error.status === 429 && retryCount === 0 && this.derankModel()) {
                         logger_1.logger.info(`Retrying with deranked model: ${this.currentModelName}`);
                         return this.getAiResponse(prompt, isBatch, retryCount + 1);
                     }
-                    // Fall back to exponential backoff if deranking not possible or already tried
+                    // Fall back to exponential backoff for all retryable errors
                     const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
-                    logger_1.logger.warn(`Rate limit exceeded. Retrying in ${backoffDelay}ms... (${retryCount + 1}/${maxRetries})`);
+                    const errorType = error.status === 429 ? "Rate limit" : "Server error";
+                    logger_1.logger.warn(`${errorType} (${error.status}). Retrying in ${backoffDelay}ms... (${retryCount + 1}/${maxRetries})`);
                     await new Promise((resolve) => setTimeout(resolve, backoffDelay));
                     return this.getAiResponse(prompt, isBatch, retryCount + 1);
                 }
                 else {
-                    logger_1.logger.error("Max retries exceeded. Skipping this request.");
+                    const errorType = error.status === 429 ? "rate limit" : "server error";
+                    logger_1.logger.error(`Max retries exceeded for ${errorType}. Skipping this request.`);
                 }
+            }
+            else if (error && typeof error === "object" && "status" in error) {
+                // Log non-retryable errors with their status codes
+                logger_1.logger.error(`Non-retryable error (${error.status}). Skipping this request.`);
             }
             return [];
         }
@@ -25980,51 +25926,160 @@ exports.BatchProcessor = BatchProcessor;
 
 /***/ }),
 
-/***/ 8221:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ 6266:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.GitHubService = void 0;
-const node_fs_1 = __importDefault(__nccwpck_require__(3024));
-const rest_1 = __nccwpck_require__(2875);
+exports.CodeAnalysisService = void 0;
+const helpers_1 = __nccwpck_require__(4482);
 const logger_1 = __nccwpck_require__(187);
-const package_json_1 = __importDefault(__nccwpck_require__(8330));
-class GitHubService {
+/**
+ * Service for analyzing code changes and generating review comments
+ */
+class CodeAnalysisService {
+    aiService;
+    batchProcessor;
+    constructor(aiService, batchProcessor) {
+        this.aiService = aiService;
+        this.batchProcessor = batchProcessor;
+    }
+    async analyzeCodeChanges(files, prDetails, conversationContext) {
+        logger_1.logger.processing(`Starting analysis of ${files.length} files`);
+        // Decide whether to use batch processing or individual file processing
+        if (this.batchProcessor.shouldUseBatching(files)) {
+            return this.analyzeBatchMode(files, prDetails, conversationContext);
+        }
+        else {
+            return this.analyzeIndividualMode(files, prDetails, conversationContext);
+        }
+    }
+    async analyzeBatchMode(files, prDetails, conversationContext) {
+        logger_1.logger.info("Using batch processing mode for performance optimization");
+        const batches = this.batchProcessor.createBatches(files);
+        const allComments = [];
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            logger_1.logger.processing(`Processing batch ${i + 1}/${batches.length} (${batch.files.length} files)`);
+            try {
+                const aiResponses = await this.aiService.reviewBatch(batch, prDetails, conversationContext);
+                const comments = this.batchProcessor.createCommentsFromBatchResponse(batch, aiResponses);
+                // Check if we got empty responses (likely due to AI service failures)
+                if (aiResponses.length === 0 && batch.files.length > 0) {
+                    logger_1.logger.warn(`Batch ${i + 1} returned no AI responses, falling back to individual processing`);
+                    const fallbackComments = await this.processFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails, conversationContext);
+                    allComments.push(...fallbackComments);
+                    logger_1.logger.info(`Batch ${i + 1} fallback generated ${fallbackComments.length} comments`);
+                }
+                else {
+                    allComments.push(...comments);
+                    logger_1.logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
+                }
+            }
+            catch (error) {
+                logger_1.logger.error(`Error processing batch ${i + 1}:`, error);
+                // Fallback: try individual file processing for this batch
+                logger_1.logger.info(`Falling back to individual processing for batch ${i + 1}`);
+                const fallbackComments = await this.processFilesIndividually(batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })), prDetails, conversationContext);
+                allComments.push(...fallbackComments);
+                logger_1.logger.info(`Batch ${i + 1} fallback generated ${fallbackComments.length} comments`);
+            }
+        }
+        logger_1.logger.success(`Batch processing generated ${allComments.length} total comments`);
+        return allComments;
+    }
+    async analyzeIndividualMode(files, prDetails, conversationContext) {
+        logger_1.logger.info("Using individual file processing mode");
+        return this.processFilesIndividually(files, prDetails, conversationContext);
+    }
+    async processFilesIndividually(files, prDetails, conversationContext) {
+        const allComments = [];
+        let hunkCount = 0;
+        let totalHunks = 0;
+        // Count total hunks for progress tracking
+        for (const file of files) {
+            if (file.path && file.path !== "/dev/null") {
+                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
+            }
+        }
+        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
+        for (const file of files) {
+            logger_1.logger.info(`Processing file: ${file.path}`);
+            if (!file.path || file.path === "/dev/null") {
+                continue;
+            }
+            for (const hunk of file.hunks) {
+                if (hunk.lines.length === 0) {
+                    continue;
+                }
+                hunkCount++;
+                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
+                try {
+                    const hunkContent = hunk.lines.join("\n");
+                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails, conversationContext);
+                    const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
+                    allComments.push(...comments);
+                }
+                catch (error) {
+                    logger_1.logger.error(`Error processing hunk ${hunkCount}:`, error);
+                }
+            }
+        }
+        logger_1.logger.success(`Individual processing generated ${allComments.length} comments`);
+        return allComments;
+    }
+}
+exports.CodeAnalysisService = CodeAnalysisService;
+
+
+/***/ }),
+
+/***/ 71:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FileFilterService = void 0;
+const helpers_1 = __nccwpck_require__(4482);
+const logger_1 = __nccwpck_require__(187);
+class FileFilterService {
+    excludePatterns;
+    constructor(excludePatterns = []) {
+        this.excludePatterns = excludePatterns;
+    }
+    filterFilesByExcludePatterns(files) {
+        if (this.excludePatterns.length === 0) {
+            return files;
+        }
+        return files.filter((file) => {
+            const shouldExclude = this.excludePatterns.some((pattern) => (0, helpers_1.matchesPattern)(file.path, pattern));
+            if (shouldExclude) {
+                logger_1.logger.debug(`Excluding file: ${file.path}`);
+                return false;
+            }
+            return true;
+        });
+    }
+}
+exports.FileFilterService = FileFilterService;
+
+
+/***/ }),
+
+/***/ 7359:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubDiffService = void 0;
+const logger_1 = __nccwpck_require__(187);
+class GitHubDiffService {
     octokit;
-    constructor(githubToken) {
-        this.octokit = new rest_1.Octokit({ auth: githubToken });
-    }
-    getPullRequestDetails() {
-        const eventData = this.getEventData();
-        const repoFullName = eventData.repository.full_name;
-        if (!eventData.pull_request) {
-            throw new Error("No pull request data found in event");
-        }
-        const [owner, repo] = repoFullName.split("/");
-        return {
-            owner,
-            repo,
-            pullNumber: eventData.pull_request.number,
-            title: eventData.pull_request.title,
-            description: eventData.pull_request.body || "",
-        };
-    }
-    getEventData() {
-        const eventPath = process.env.GITHUB_EVENT_PATH;
-        if (!eventPath) {
-            throw new Error("GITHUB_EVENT_PATH environment variable is not set");
-        }
-        const eventData = JSON.parse(node_fs_1.default.readFileSync(eventPath, "utf8"));
-        return eventData;
-    }
-    isPullRequestDraft() {
-        const eventData = this.getEventData();
-        return eventData.pull_request?.draft ?? false;
+    constructor(octokit) {
+        this.octokit = octokit;
     }
     async getPullRequestDiff(owner, repo, pullNumber) {
         try {
@@ -26046,24 +26101,6 @@ class GitHubService {
             return "";
         }
     }
-    async createReviewComments(owner, repo, pullNumber, comments) {
-        try {
-            logger_1.logger.processing(`Creating review with ${comments.length} comments`);
-            await this.octokit.pulls.createReview({
-                owner,
-                repo,
-                pull_number: pullNumber,
-                body: `${package_json_1.default.name} comments`,
-                comments,
-                event: "COMMENT",
-            });
-            logger_1.logger.success("Review created successfully");
-        }
-        catch (error) {
-            logger_1.logger.error("Error creating review:", error);
-            throw error;
-        }
-    }
     async getPullRequestCommits(owner, repo, pullNumber) {
         try {
             logger_1.logger.processing(`Fetching commits for PR #${pullNumber}`);
@@ -26080,56 +26117,348 @@ class GitHubService {
             return [];
         }
     }
-    async getConversationContext(owner, repo, pullNumber) {
+}
+exports.GitHubDiffService = GitHubDiffService;
+
+
+/***/ }),
+
+/***/ 2146:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubEventService = void 0;
+const node_fs_1 = __importDefault(__nccwpck_require__(3024));
+class GitHubEventService {
+    getPullRequestDetails() {
+        const eventData = this.getEventData();
+        const repoFullName = eventData.repository.full_name;
+        if (!eventData.pull_request) {
+            throw new Error("No pull request data found in event");
+        }
+        const [owner, repo] = repoFullName.split("/");
+        return {
+            owner,
+            repo,
+            pullNumber: eventData.pull_request.number,
+            title: eventData.pull_request.title,
+            description: eventData.pull_request.body || "",
+        };
+    }
+    isPullRequestDraft() {
+        const eventData = this.getEventData();
+        return eventData.pull_request?.draft ?? false;
+    }
+    getEventData() {
+        const eventPath = process.env.GITHUB_EVENT_PATH;
+        if (!eventPath) {
+            throw new Error("GITHUB_EVENT_PATH environment variable is not set");
+        }
+        const eventData = JSON.parse(node_fs_1.default.readFileSync(eventPath, "utf8"));
+        return eventData;
+    }
+}
+exports.GitHubEventService = GitHubEventService;
+
+
+/***/ }),
+
+/***/ 211:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubGraphQLService = void 0;
+const graphql_1 = __nccwpck_require__(6489);
+const logger_1 = __nccwpck_require__(187);
+class GitHubGraphQLService {
+    octokit;
+    graphqlClient;
+    constructor(octokit, githubToken) {
+        this.octokit = octokit;
+        this.graphqlClient = graphql_1.graphql.defaults({
+            headers: {
+                authorization: `token ${githubToken}`,
+            },
+        });
+    }
+    /**
+     * Identifies resolved comments using the actual GitHub GraphQL API resolution status.
+     * This is more accurate than the heuristics-based approach using REST API.
+     */
+    async identifyResolvedComments(owner, repo, pullNumber, comments) {
+        const resolvedComments = [];
         try {
-            logger_1.logger.processing(`Retrieving conversation context for PR #${pullNumber}`);
-            // Get existing reviews, comments, and commits from this PR
-            const [reviews, comments, commits] = await Promise.all([
-                this.octokit.pulls.listReviews({
-                    owner,
-                    repo,
-                    pull_number: pullNumber,
-                }),
-                this.octokit.pulls.listReviewComments({
-                    owner,
-                    repo,
-                    pull_number: pullNumber,
-                }),
-                this.getPullRequestCommits(owner, repo, pullNumber),
-            ]);
-            // Filter for comments made by this action
-            const actionReviews = reviews.data.filter((review) => review.body?.includes(package_json_1.default.name) &&
-                review.user?.login === "github-actions[bot]");
-            const actionComments = comments.data.filter((comment) => comment.user?.login === "github-actions[bot]");
-            // Get PR conversations (issue comments)
-            const issueComments = await this.octokit.issues.listComments({
-                owner,
-                repo,
-                issue_number: pullNumber,
-            });
-            const actionIssueComments = issueComments.data.filter((comment) => comment.user?.login === "github-actions[bot]" &&
-                comment.body?.includes(`<!-- [${package_json_1.default.name}:context] -->`));
-            const context = {
-                previousReviews: actionReviews,
-                previousComments: actionComments,
-                conversationHistory: actionIssueComments,
-                commits: commits,
-            };
-            logger_1.logger.info(`Retrieved context: ${context.previousReviews.length} reviews, ` +
-                `${context.previousComments.length} comments, ` +
-                `${context.conversationHistory.length} conversation entries, ` +
-                `${context.commits.length} commits`);
-            return context;
+            // Get review threads with actual resolution status from GraphQL
+            const reviewThreads = await this.getReviewThreadsWithResolutionStatus(owner, repo, pullNumber);
+            // Create a map of comment database ID to comment data for faster lookup
+            const commentMap = new Map();
+            for (const comment of comments) {
+                if (comment.user?.login === "github-actions[bot]") {
+                    commentMap.set(comment.id, comment);
+                }
+            }
+            logger_1.logger.debug(`Found ${commentMap.size} bot comments to check for resolution`);
+            // Process each resolved thread
+            for (const thread of reviewThreads) {
+                if (!thread.isResolved) {
+                    continue;
+                }
+                // Find ALL comments in this resolved thread (not just bot comments)
+                for (const graphqlComment of thread.comments.nodes) {
+                    // Check if this comment exists in our bot comments map
+                    if (commentMap.has(graphqlComment.databaseId)) {
+                        const restComment = commentMap.get(graphqlComment.databaseId);
+                        resolvedComments.push({
+                            id: restComment.id,
+                            path: restComment.path,
+                            line: restComment.line || null,
+                            position: restComment.position || null,
+                            resolvedAt: graphqlComment.updatedAt,
+                            resolvedBy: thread.resolvedBy?.login || "unknown",
+                            originalComment: restComment.body || "",
+                            isResolved: true,
+                        });
+                    }
+                }
+            }
+            logger_1.logger.debug(`Identified ${resolvedComments.length} resolved comments using GraphQL API`);
+            return resolvedComments;
         }
         catch (error) {
-            logger_1.logger.error("Error retrieving conversation context:", error);
-            // Return empty context on error to allow processing to continue
-            return {
-                previousReviews: [],
-                previousComments: [],
-                conversationHistory: [],
-                commits: [],
-            };
+            logger_1.logger.error("Error identifying resolved comments:", error);
+            // Fallback to heuristics-based approach if GraphQL fails
+            logger_1.logger.warn("Falling back to heuristics-based resolution detection");
+            return this.identifyResolvedCommentsUsingHeuristics(owner, repo, pullNumber, comments);
+        }
+    }
+    /**
+     * Fetches review threads for a pull request using GraphQL API to get actual resolution status
+     */
+    async getReviewThreadsWithResolutionStatus(owner, repo, pullNumber) {
+        try {
+            logger_1.logger.debug(`Fetching review threads for PR #${pullNumber} using GraphQL`);
+            const query = `
+        query GetPullRequestReviewThreads($owner: String!, $repo: String!, $pullNumber: Int!, $cursor: String) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $pullNumber) {
+              reviewThreads(first: 100, after: $cursor) {
+                nodes {
+                  id
+                  isResolved
+                  resolvedBy {
+                    login
+                  }
+                  comments(first: 100) {
+                    nodes {
+                      id
+                      databaseId
+                      body
+                      path
+                      line
+                      position
+                      createdAt
+                      updatedAt
+                      author {
+                        login
+                      }
+                    }
+                  }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }
+        }
+      `;
+            let allThreads = [];
+            let cursor;
+            let hasNextPage = true;
+            // Handle pagination
+            while (hasNextPage) {
+                const response = await this.graphqlClient(query, {
+                    owner,
+                    repo,
+                    pullNumber,
+                    cursor,
+                });
+                const threads = response.repository.pullRequest.reviewThreads.nodes;
+                allThreads = allThreads.concat(threads);
+                hasNextPage =
+                    response.repository.pullRequest.reviewThreads.pageInfo.hasNextPage;
+                cursor =
+                    response.repository.pullRequest.reviewThreads.pageInfo.endCursor;
+            }
+            logger_1.logger.debug(`Retrieved ${allThreads.length} review threads via GraphQL`);
+            return allThreads;
+        }
+        catch (error) {
+            logger_1.logger.error("Error fetching review threads via GraphQL:", error);
+            return [];
+        }
+    }
+    /**
+     * Fallback method that uses heuristics to identify resolved comments
+     * when GraphQL API is not available or fails
+     */
+    async identifyResolvedCommentsUsingHeuristics(owner, repo, pullNumber, comments) {
+        const resolvedComments = [];
+        try {
+            for (const comment of comments) {
+                if (!comment.user || comment.user.login !== "github-actions[bot]") {
+                    continue;
+                }
+                // Check for resolution indicators using heuristics
+                const isResolved = await this.checkCommentResolutionStatusUsingHeuristics(owner, repo, pullNumber, comment);
+                if (isResolved.resolved) {
+                    resolvedComments.push({
+                        id: comment.id,
+                        path: comment.path,
+                        line: comment.line || null,
+                        position: comment.position || null,
+                        resolvedAt: isResolved.resolvedAt || comment.updated_at,
+                        resolvedBy: isResolved.resolvedBy || "unknown",
+                        originalComment: comment.body || "",
+                        isResolved: true,
+                    });
+                }
+            }
+            logger_1.logger.debug(`Identified ${resolvedComments.length} resolved comments using heuristics`);
+            return resolvedComments;
+        }
+        catch (error) {
+            logger_1.logger.error("Error identifying resolved comments using heuristics:", error);
+            return [];
+        }
+    }
+    /**
+     * Checks if a specific comment has been resolved using various heuristics
+     * This is a fallback method when GraphQL API is not available
+     */
+    async checkCommentResolutionStatusUsingHeuristics(owner, repo, pullNumber, comment) {
+        try {
+            // Get reactions to the comment
+            const reactions = await this.octokit.reactions.listForPullRequestReviewComment({
+                owner,
+                repo,
+                comment_id: comment.id,
+            });
+            // Check for "thumbs up" or "hooray" reactions which often indicate resolution
+            const positiveReactions = reactions.data.filter((reaction) => reaction.content === "+1" || reaction.content === "hooray");
+            // Check for resolution indicators in comment replies
+            // Note: This is a simplified approach since getting threaded conversations requires GraphQL
+            const recentComments = await this.octokit.pulls.listReviewComments({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                since: comment.created_at,
+            });
+            // Look for replies that indicate resolution
+            const resolutionReplies = recentComments.data.filter((reply) => {
+                if (reply.in_reply_to_id !== comment.id)
+                    return false;
+                const body = reply.body?.toLowerCase() || "";
+                return (body.includes("resolved") ||
+                    body.includes("fixed") ||
+                    body.includes("addressed") ||
+                    body.includes("done") ||
+                    body.includes("👍") ||
+                    body.includes("✅"));
+            });
+            // Determine if comment is resolved
+            const hasPositiveReactions = positiveReactions.length > 0;
+            const hasResolutionReplies = resolutionReplies.length > 0;
+            if (hasPositiveReactions || hasResolutionReplies) {
+                const resolvedBy = positiveReactions[0]?.user?.login ||
+                    resolutionReplies[0]?.user?.login ||
+                    "unknown";
+                const resolvedAt = resolutionReplies[0]?.created_at ||
+                    positiveReactions[0]?.created_at ||
+                    comment.updated_at;
+                return {
+                    resolved: true,
+                    resolvedAt,
+                    resolvedBy,
+                };
+            }
+            return { resolved: false };
+        }
+        catch (error) {
+            logger_1.logger.error(`Error checking resolution status for comment ${comment.id} using heuristics:`, error);
+            return { resolved: false };
+        }
+    }
+}
+exports.GitHubGraphQLService = GitHubGraphQLService;
+
+
+/***/ }),
+
+/***/ 9380:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubGraphQLService = exports.GitHubReviewService = exports.GitHubDiffService = exports.GitHubEventService = exports.GitHubService = void 0;
+// Main GitHub service orchestrator
+var service_1 = __nccwpck_require__(3011);
+Object.defineProperty(exports, "GitHubService", ({ enumerable: true, get: function () { return service_1.GitHubService; } }));
+// Individual GitHub services
+var event_service_1 = __nccwpck_require__(2146);
+Object.defineProperty(exports, "GitHubEventService", ({ enumerable: true, get: function () { return event_service_1.GitHubEventService; } }));
+var diff_service_1 = __nccwpck_require__(7359);
+Object.defineProperty(exports, "GitHubDiffService", ({ enumerable: true, get: function () { return diff_service_1.GitHubDiffService; } }));
+var review_service_1 = __nccwpck_require__(7092);
+Object.defineProperty(exports, "GitHubReviewService", ({ enumerable: true, get: function () { return review_service_1.GitHubReviewService; } }));
+var graphql_service_1 = __nccwpck_require__(211);
+Object.defineProperty(exports, "GitHubGraphQLService", ({ enumerable: true, get: function () { return graphql_service_1.GitHubGraphQLService; } }));
+
+
+/***/ }),
+
+/***/ 7092:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubReviewService = void 0;
+const logger_1 = __nccwpck_require__(187);
+const package_json_1 = __importDefault(__nccwpck_require__(8330));
+class GitHubReviewService {
+    octokit;
+    constructor(octokit) {
+        this.octokit = octokit;
+    }
+    async createReviewComments(owner, repo, pullNumber, comments) {
+        try {
+            logger_1.logger.processing(`Creating review with ${comments.length} comments`);
+            await this.octokit.pulls.createReview({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                body: `${package_json_1.default.name} comments`,
+                comments,
+                event: "COMMENT",
+            });
+            logger_1.logger.success("Review created successfully");
+        }
+        catch (error) {
+            logger_1.logger.error("Error creating review:", error);
+            throw error;
         }
     }
     async saveConversationContext(owner, repo, pullNumber, contextSummary, reviewCount = 1) {
@@ -26182,22 +26511,264 @@ ${contextSummary}
         }
     }
 }
+exports.GitHubReviewService = GitHubReviewService;
+
+
+/***/ }),
+
+/***/ 3011:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubService = void 0;
+const rest_1 = __nccwpck_require__(8781);
+const event_service_1 = __nccwpck_require__(2146);
+const diff_service_1 = __nccwpck_require__(7359);
+const review_service_1 = __nccwpck_require__(7092);
+const graphql_service_1 = __nccwpck_require__(211);
+const logger_1 = __nccwpck_require__(187);
+const package_json_1 = __importDefault(__nccwpck_require__(8330));
+class GitHubService {
+    octokit;
+    eventService;
+    diffService;
+    reviewService;
+    graphqlService;
+    constructor(githubToken) {
+        this.octokit = new rest_1.Octokit({ auth: githubToken });
+        this.eventService = new event_service_1.GitHubEventService();
+        this.diffService = new diff_service_1.GitHubDiffService(this.octokit);
+        this.reviewService = new review_service_1.GitHubReviewService(this.octokit);
+        this.graphqlService = new graphql_service_1.GitHubGraphQLService(this.octokit, githubToken);
+    }
+    getPullRequestDetails() {
+        return this.eventService.getPullRequestDetails();
+    }
+    isPullRequestDraft() {
+        return this.eventService.isPullRequestDraft();
+    }
+    async getPullRequestDiff(owner, repo, pullNumber) {
+        return this.diffService.getPullRequestDiff(owner, repo, pullNumber);
+    }
+    async createReviewComments(owner, repo, pullNumber, comments) {
+        return this.reviewService.createReviewComments(owner, repo, pullNumber, comments);
+    }
+    async getPullRequestCommits(owner, repo, pullNumber) {
+        return this.diffService.getPullRequestCommits(owner, repo, pullNumber);
+    }
+    async getConversationContext(owner, repo, pullNumber) {
+        try {
+            logger_1.logger.processing(`Retrieving conversation context for PR #${pullNumber}`);
+            // Get existing reviews, comments, and commits from this PR
+            const [reviews, comments, commits] = await Promise.all([
+                this.octokit.pulls.listReviews({
+                    owner,
+                    repo,
+                    pull_number: pullNumber,
+                }),
+                this.octokit.pulls.listReviewComments({
+                    owner,
+                    repo,
+                    pull_number: pullNumber,
+                }),
+                this.getPullRequestCommits(owner, repo, pullNumber),
+            ]);
+            // Filter for comments made by this action
+            const actionReviews = reviews.data.filter((review) => review.body?.includes(package_json_1.default.name) &&
+                review.user?.login === "github-actions[bot]");
+            const actionComments = comments.data.filter((comment) => comment.user?.login === "github-actions[bot]");
+            // Get PR conversations (issue comments)
+            const issueComments = await this.octokit.issues.listComments({
+                owner,
+                repo,
+                issue_number: pullNumber,
+            });
+            const actionIssueComments = issueComments.data.filter((comment) => comment.user?.login === "github-actions[bot]" &&
+                comment.body?.includes(`<!-- [${package_json_1.default.name}:context] -->`));
+            // Identify resolved comments using the GraphQL service
+            const resolvedComments = await this.graphqlService.identifyResolvedComments(owner, repo, pullNumber, actionComments);
+            const context = {
+                previousReviews: actionReviews,
+                previousComments: actionComments,
+                conversationHistory: actionIssueComments,
+                commits: commits,
+                resolvedComments: resolvedComments,
+            };
+            logger_1.logger.info(`Retrieved context: ${context.previousReviews.length} reviews, ` +
+                `${context.previousComments.length} comments, ` +
+                `${context.conversationHistory.length} conversation entries, ` +
+                `${context.commits.length} commits`);
+            return context;
+        }
+        catch (error) {
+            logger_1.logger.error("Error retrieving conversation context:", error);
+            // Return empty context on error to allow processing to continue
+            return {
+                previousReviews: [],
+                previousComments: [],
+                conversationHistory: [],
+                commits: [],
+                resolvedComments: [],
+            };
+        }
+    }
+    async saveConversationContext(owner, repo, pullNumber, contextSummary, reviewCount = 1) {
+        return this.reviewService.saveConversationContext(owner, repo, pullNumber, contextSummary, reviewCount);
+    }
+}
 exports.GitHubService = GitHubService;
 
 
 /***/ }),
 
-/***/ 2354:
+/***/ 8919:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.shouldIncludeContext = shouldIncludeContext;
+exports.filterResolvedCodeSections = filterResolvedCodeSections;
+const logger_1 = __nccwpck_require__(187);
+/**
+ * Determines if context should be included based on its relevance and size
+ */
+function shouldIncludeContext(context) {
+    const totalItems = context.previousReviews.length +
+        context.previousComments.length +
+        context.conversationHistory.length +
+        context.commits.length;
+    // Include context if there's meaningful previous interaction
+    if (totalItems > 0) {
+        // Calculate estimated context size
+        const estimatedSize = estimateContextSize(context);
+        // Don't include if context is too large (>2000 characters)
+        if (estimatedSize > 2000) {
+            logger_1.logger.debug(`Context too large (${estimatedSize} chars), including summarized version`);
+            return true; // We'll use summarized version
+        }
+        return true;
+    }
+    return false;
+}
+/**
+ * Estimates the size of context in characters for token management
+ */
+function estimateContextSize(context) {
+    let size = 0;
+    // Reviews
+    size += context.previousReviews.reduce((acc, review) => acc + (review.body?.length || 0) + 50, // +50 for metadata
+    0);
+    // Comments
+    size += context.previousComments.reduce((acc, comment) => acc + (comment.body?.length || 0) + 30, // +30 for metadata
+    0);
+    // Conversation history
+    size += context.conversationHistory.reduce((acc, comment) => acc + (comment.body?.length || 0) + 30, 0);
+    // Commits (smaller impact)
+    size += context.commits.reduce((acc, commit) => acc + commit.commit.message.length + 20, 0);
+    return size;
+}
+/**
+ * Filters out code sections that have been resolved based on previous comments
+ */
+function filterResolvedCodeSections(files, resolvedComments) {
+    if (resolvedComments.length === 0) {
+        return files;
+    }
+    logger_1.logger.debug(`Filtering ${files.length} files against ${resolvedComments.length} resolved comments`);
+    return files
+        .map((file) => {
+        const resolvedForFile = resolvedComments.filter((resolved) => resolved.path === file.path);
+        if (resolvedForFile.length === 0) {
+            return file;
+        }
+        const filteredHunks = file.hunks.filter((hunk) => shouldKeepHunk(hunk, resolvedForFile));
+        return {
+            ...file,
+            hunks: filteredHunks,
+        };
+    })
+        .filter((file) => file.hunks.length > 0); // Remove files with no hunks
+}
+/**
+ * Determines if a hunk should be kept based on resolved comments
+ */
+function shouldKeepHunk(hunk, resolvedComments) {
+    const hunkLines = extractLineNumbers(hunk.header);
+    return !resolvedComments.some((resolved) => {
+        // If no line number in resolved comment, can't filter
+        if (!resolved.line) {
+            return false;
+        }
+        // Check if resolved comment line overlaps with this hunk
+        return resolved.line >= hunkLines.start && resolved.line <= hunkLines.end;
+    });
+}
+/**
+ * Extracts line numbers from hunk header
+ */
+function extractLineNumbers(header) {
+    // Parse hunk header like "@@ -1,7 +1,8 @@"
+    const match = header.match(/@@ -\d+,?\d* \+(\d+),?(\d*) @@/);
+    if (!match) {
+        return { start: 0, end: 0 };
+    }
+    const start = parseInt(match[1], 10);
+    const count = match[2] ? parseInt(match[2], 10) : 1;
+    const end = start + count - 1;
+    return { start, end };
+}
+
+
+/***/ }),
+
+/***/ 6969:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.logContextStats = logContextStats;
+const logger_1 = __nccwpck_require__(187);
+/**
+ * Logs statistics about the conversation context for debugging
+ */
+function logContextStats(context) {
+    const stats = {
+        reviews: context.previousReviews.length,
+        comments: context.previousComments.length,
+        conversations: context.conversationHistory.length,
+        commits: context.commits.length,
+        resolved: context.resolvedComments.length,
+    };
+    logger_1.logger.debug(`Context stats: ${stats.reviews} reviews, ${stats.comments} comments, ` +
+        `${stats.conversations} conversations, ${stats.commits} commits, ` +
+        `${stats.resolved} resolved`);
+    if (stats.resolved > 0) {
+        const resolvedFiles = [
+            ...new Set(context.resolvedComments.map((c) => c.path)),
+        ];
+        logger_1.logger.info(`Found ${stats.resolved} resolved comments across ${resolvedFiles.length} files`);
+    }
+}
+
+
+/***/ }),
+
+/***/ 1380:
+/***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.summarizeConversationContext = summarizeConversationContext;
 exports.createContextSummary = createContextSummary;
-exports.shouldIncludeContext = shouldIncludeContext;
-exports.logContextStats = logContextStats;
-const logger_1 = __nccwpck_require__(187);
+exports.createResolvedCommentsSummary = createResolvedCommentsSummary;
 /**
  * Creates a summarized conversation context string from the full context object.
  * This is used to provide context to the AI without overwhelming it with too much information.
@@ -26237,140 +26808,154 @@ function summarizeConversationContext(context) {
             .slice(-5) // Limit to 5 most recent files
             .map(([filePath, comments]) => {
             const recentComments = comments
-                .slice(-2) // Last 2 comments per file
+                .slice(-2) // Most recent 2 comments per file
                 .map((comment) => {
-                const preview = comment.body.length > 80
-                    ? comment.body.substring(0, 80) + "..."
-                    : comment.body;
-                return `    - Line ${comment.line}: ${preview}`;
+                const body = comment.body || "";
+                const cleanBody = body
+                    .replace(/<!--.*?-->/gs, "")
+                    .replace(/\[.*?\]/g, "")
+                    .trim();
+                const firstLine = cleanBody.split("\n")[0] || cleanBody;
+                const preview = firstLine.length > 80
+                    ? firstLine.substring(0, 80) + "..."
+                    : firstLine;
+                return `    - Line ${comment.line || "?"}: ${preview}`;
             })
                 .join("\n");
-            return `  **${filePath}** (${comments.length} comment${comments.length > 1 ? "s" : ""}):\n${recentComments}`;
+            return `  **${filePath}** (${comments.length} comments):\n${recentComments}`;
         })
             .join("\n\n");
-        parts.push(`**Previous Comments on Code (${context.previousComments.length} total across ${uniqueFiles.size} files):**\n${fileSummaries}`);
+        parts.push(`**Previous Comments (${context.previousComments.length} total, showing recent):**\n${fileSummaries}`);
     }
-    // Add conversation history summary
+    // Add resolved comments summary
+    if (context.resolvedComments.length > 0) {
+        const resolvedSummary = createResolvedCommentsSummary(context.resolvedComments);
+        parts.push(resolvedSummary);
+    }
+    // Add conversation history
     if (context.conversationHistory.length > 0) {
-        const historyPreview = context.conversationHistory
-            .slice(-2) // Last 2 conversation entries
-            .map((entry, index) => {
-            const date = new Date(entry.created_at).toLocaleDateString();
-            const cleanBody = entry.body ||
-                ""
-                    .replace(/<!--.*?-->/gs, "") // Remove HTML comments
-                    .replace(/###.*$/gm, "") // Remove headers
-                    .replace(/---.*$/gm, "") // Remove separators
-                    .replace(/\*This comment.*$/gm, "") // Remove footer text
-                    .trim();
-            const preview = cleanBody.length > 150
-                ? cleanBody.substring(0, 150) + "..."
-                : cleanBody;
+        const conversationSummary = context.conversationHistory
+            .slice(-3) // Show last 3 conversation entries
+            .map((comment, index) => {
+            const date = new Date(comment.created_at).toLocaleDateString();
+            const body = comment.body || "";
+            const cleanBody = body
+                .replace(/<!--.*?-->/gs, "")
+                .replace(/#{1,6}\s*/g, "") // Remove markdown headers
+                .trim();
+            const firstLine = cleanBody.split("\n")[0] || cleanBody;
+            const preview = firstLine.length > 120
+                ? firstLine.substring(0, 120) + "..."
+                : firstLine;
             return `  ${index + 1}. ${date}: ${preview}`;
         })
             .join("\n");
-        parts.push(`**Conversation History (${context.conversationHistory.length} entries, showing latest):**\n${historyPreview}`);
+        parts.push(`**Conversation Updates (${context.conversationHistory.length} total):**\n${conversationSummary}`);
     }
-    if (parts.length === 0) {
-        return "";
-    }
-    return parts.join("\n\n");
-}
-/**
- * Creates a context summary for saving to GitHub comments.
- * This provides a human-readable summary of the conversation state.
- */
-function createContextSummary(context, currentReviewSummary) {
-    const parts = [];
     // Add commit information
     if (context.commits.length > 0) {
-        const latestCommit = context.commits[context.commits.length - 1];
-        const commitDate = new Date(latestCommit.commit.author?.date || new Date().toISOString());
-        const commitHash = latestCommit.sha.substring(0, 7);
-        const commitSubject = latestCommit.commit.message.split("\n")[0];
-        const authorName = latestCommit.commit.author?.name || "Unknown";
-        parts.push(`📝 **Latest Commit**: \`${commitHash}\` - ${commitSubject} by ${authorName} (${commitDate.toLocaleDateString()})`);
-        if (context.commits.length > 1) {
-            parts.push(`📦 **Total Commits**: ${context.commits.length} commit${context.commits.length > 1 ? "s" : ""} in this PR`);
-        }
+        const recentCommits = context.commits
+            .slice(-3) // Show last 3 commits
+            .map((commit, index) => {
+            const message = commit.commit.message.split("\n")[0]; // First line only
+            const shortSha = commit.sha.substring(0, 7);
+            const preview = message.length > 60 ? message.substring(0, 60) + "..." : message;
+            return `  ${index + 1}. ${shortSha}: ${preview}`;
+        })
+            .join("\n");
+        parts.push(`**Recent Commits (${context.commits.length} total):**\n${recentCommits}`);
     }
+    return parts.length > 0
+        ? parts.join("\n\n")
+        : "No previous context available.";
+}
+/**
+ * Creates a comprehensive context summary for saving in GitHub comments
+ */
+function createContextSummary(context, additionalInfo) {
+    const sections = [];
+    // Review summary
     if (context.previousReviews.length > 0) {
-        parts.push(`📋 **Review History**: ${context.previousReviews.length} previous review${context.previousReviews.length > 1 ? "s" : ""}`);
+        sections.push(`📝 **Reviews**: ${context.previousReviews.length} previous review${context.previousReviews.length > 1 ? "s" : ""}`);
     }
+    // Comments summary
     if (context.previousComments.length > 0) {
-        const uniqueFiles = new Set(context.previousComments.map((c) => c.path));
-        parts.push(`💬 **Comments**: ${context.previousComments.length} comment${context.previousComments.length > 1 ? "s" : ""} across ${uniqueFiles.size} file${uniqueFiles.size > 1 ? "s" : ""}`);
+        const uniqueFiles = [
+            ...new Set(context.previousComments.map((c) => c.path)),
+        ];
+        sections.push(`💬 **Comments**: ${context.previousComments.length} comment${context.previousComments.length > 1 ? "s" : ""} across ${uniqueFiles.length} file${uniqueFiles.length > 1 ? "s" : ""}`);
     }
-    if (currentReviewSummary) {
-        parts.push(`🔍 **Latest Review**: ${currentReviewSummary}`);
+    // Resolved comments summary
+    if (context.resolvedComments.length > 0) {
+        const resolvedFiles = [
+            ...new Set(context.resolvedComments.map((c) => c.path)),
+        ];
+        sections.push(`✅ **Resolved**: ${context.resolvedComments.length} issue${context.resolvedComments.length > 1 ? "s" : ""} resolved across ${resolvedFiles.length} file${resolvedFiles.length > 1 ? "s" : ""}`);
     }
-    const lastActivity = getLastActivityDate(context);
-    if (lastActivity) {
-        parts.push(`🕒 **Last Activity**: ${lastActivity.toUTCString()}`);
+    // Commits summary
+    if (context.commits.length > 0) {
+        sections.push(`🔄 **Commits**: ${context.commits.length} commit${context.commits.length > 1 ? "s" : ""} in this PR`);
     }
-    return parts.join("\n");
+    // Conversation history
+    if (context.conversationHistory.length > 0) {
+        sections.push(`💭 **Discussion**: ${context.conversationHistory.length} conversation update${context.conversationHistory.length > 1 ? "s" : ""}`);
+    }
+    let summary = sections.length > 0 ? sections.join(", ") : "No prior context";
+    if (additionalInfo) {
+        summary += `\n\n**Latest Update**: ${additionalInfo}`;
+    }
+    return summary;
 }
 /**
- * Determines if context should be included based on the age and amount of previous activity.
+ * Creates a summary of resolved comments for display
  */
-function shouldIncludeContext(context) {
-    const totalActivity = context.previousReviews.length +
-        context.previousComments.length +
-        context.conversationHistory.length;
-    if (totalActivity === 0) {
-        return false;
+function createResolvedCommentsSummary(resolvedComments) {
+    if (resolvedComments.length === 0) {
+        return "";
     }
-    // Always include context if there's recent activity
-    const lastActivity = getLastActivityDate(context);
-    if (lastActivity) {
-        const daysSinceLastActivity = (Date.now() - lastActivity.getTime()) / (1000 * 60 * 60 * 24);
-        // Include context if last activity was within 30 days
-        if (daysSinceLastActivity <= 30) {
-            return true;
+    const resolvedByFile = new Map();
+    resolvedComments.forEach((comment) => {
+        if (!resolvedByFile.has(comment.path)) {
+            resolvedByFile.set(comment.path, []);
         }
-        // For older activity, only include if there's substantial history
-        return totalActivity >= 5;
+        resolvedByFile.get(comment.path).push(comment);
+    });
+    const fileSummaries = Array.from(resolvedByFile.entries())
+        .slice(-3) // Show last 3 files with resolutions
+        .map(([filePath, comments]) => {
+        const resolvers = [...new Set(comments.map((c) => c.resolvedBy))];
+        return `  **${filePath}**: ${comments.length} issue${comments.length > 1 ? "s" : ""} resolved by ${resolvers.join(", ")}`;
+    })
+        .join("\n");
+    return `**Resolved Issues (${resolvedComments.length} total):**\n${fileSummaries}`;
+}
+
+
+/***/ }),
+
+/***/ 2354:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
     }
-    return totalActivity >= 3;
-}
-/**
- * Gets the date of the most recent activity in the conversation context.
- */
-function getLastActivityDate(context) {
-    const dates = [];
-    context.previousReviews.forEach((review) => {
-        dates.push(new Date(review.submitted_at || new Date().toISOString()));
-    });
-    context.previousComments.forEach((comment) => {
-        dates.push(new Date(comment.updated_at || comment.created_at));
-    });
-    context.conversationHistory.forEach((entry) => {
-        dates.push(new Date(entry.updated_at || entry.created_at));
-    });
-    context.commits.forEach((commit) => {
-        if (commit.commit.author?.date) {
-            dates.push(new Date(commit.commit.author.date));
-        }
-    });
-    if (dates.length === 0) {
-        return null;
-    }
-    return new Date(Math.max(...dates.map((d) => d.getTime())));
-}
-/**
- * Logs conversation context statistics for debugging.
- */
-function logContextStats(context) {
-    const stats = {
-        reviews: context.previousReviews.length,
-        comments: context.previousComments.length,
-        conversations: context.conversationHistory.length,
-        commits: context.commits.length,
-        shouldInclude: shouldIncludeContext(context),
-        lastActivity: getLastActivityDate(context)?.toISOString() || "none",
-    };
-    logger_1.logger.info(`Conversation context stats: ${JSON.stringify(stats)}`);
-}
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+__exportStar(__nccwpck_require__(1380), exports);
+__exportStar(__nccwpck_require__(8919), exports);
+__exportStar(__nccwpck_require__(6969), exports);
 
 
 /***/ }),
@@ -26503,29 +27088,26 @@ exports.colors = {
     gray: "\x1b[90m",
 };
 exports.logger = {
-    verbose: (message) => {
-        console.log(`${exports.colors.magenta}ℹ ${message}${exports.colors.reset}`);
+    verbose: (message, meta) => {
+        console.log(`${exports.colors.magenta}ℹ ${message}${exports.colors.reset}`, meta || "");
     },
-    info: (message) => {
-        console.log(`${exports.colors.blue}ℹ ${message}${exports.colors.reset}`);
+    info: (message, meta) => {
+        console.log(`${exports.colors.blue}ℹ ${message}${exports.colors.reset}`, meta || "");
     },
-    success: (message) => {
-        console.log(`${exports.colors.green}✓ ${message}${exports.colors.reset}`);
+    success: (message, meta) => {
+        console.log(`${exports.colors.green}✓ ${message}${exports.colors.reset}`, meta || "");
     },
-    warn: (message) => {
-        console.log(`${exports.colors.yellow}⚠ ${message}${exports.colors.reset}`);
+    warn: (message, meta) => {
+        console.log(`${exports.colors.yellow}⚠ ${message}${exports.colors.reset}`, meta || "");
     },
-    error: (message, error) => {
-        console.log(`${exports.colors.red}✗ ${message}${exports.colors.reset}`);
-        if (error) {
-            console.error(error);
-        }
+    error: (message, meta) => {
+        console.log(`${exports.colors.red}✗ ${message}${exports.colors.reset}`, meta || "");
     },
-    processing: (message) => {
-        console.log(`${exports.colors.cyan}⚙ ${message}${exports.colors.reset}`);
+    processing: (message, meta) => {
+        console.log(`${exports.colors.cyan}⚙ ${message}${exports.colors.reset}`, meta || "");
     },
-    debug: (message) => {
-        console.log(`${exports.colors.gray}🔍 ${message}${exports.colors.reset}`);
+    debug: (message, meta) => {
+        console.log(`${exports.colors.gray}🔍 ${message}${exports.colors.reset}`, meta || "");
     },
 };
 
@@ -45662,178 +46244,159 @@ exports.setDefaultBaseUrls = setDefaultBaseUrls;
 
 /***/ }),
 
-/***/ 2875:
+/***/ 6489:
 /***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
 
 "use strict";
-// ESM COMPAT FLAG
 __nccwpck_require__.r(__webpack_exports__);
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   GraphqlResponseError: () => (/* binding */ GraphqlResponseError),
+/* harmony export */   graphql: () => (/* binding */ graphql2),
+/* harmony export */   withCustomRequest: () => (/* binding */ withCustomRequest)
+/* harmony export */ });
+/* harmony import */ var _octokit_request__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(5230);
+/* harmony import */ var universal_user_agent__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(2849);
+// pkg/dist-src/index.js
+
+
+
+// pkg/dist-src/version.js
+var VERSION = "0.0.0-development";
+
+// pkg/dist-src/with-defaults.js
+
+
+// pkg/dist-src/graphql.js
+
+
+// pkg/dist-src/error.js
+function _buildMessageForResponseErrors(data) {
+  return `Request failed due to following response errors:
+` + data.errors.map((e) => ` - ${e.message}`).join("\n");
+}
+var GraphqlResponseError = class extends Error {
+  constructor(request2, headers, response) {
+    super(_buildMessageForResponseErrors(response));
+    this.request = request2;
+    this.headers = headers;
+    this.response = response;
+    this.errors = response.errors;
+    this.data = response.data;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+  name = "GraphqlResponseError";
+  errors;
+  data;
+};
+
+// pkg/dist-src/graphql.js
+var NON_VARIABLE_OPTIONS = [
+  "method",
+  "baseUrl",
+  "url",
+  "headers",
+  "request",
+  "query",
+  "mediaType",
+  "operationName"
+];
+var FORBIDDEN_VARIABLE_OPTIONS = ["query", "method", "url"];
+var GHES_V3_SUFFIX_REGEX = /\/api\/v3\/?$/;
+function graphql(request2, query, options) {
+  if (options) {
+    if (typeof query === "string" && "query" in options) {
+      return Promise.reject(
+        new Error(`[@octokit/graphql] "query" cannot be used as variable name`)
+      );
+    }
+    for (const key in options) {
+      if (!FORBIDDEN_VARIABLE_OPTIONS.includes(key)) continue;
+      return Promise.reject(
+        new Error(
+          `[@octokit/graphql] "${key}" cannot be used as variable name`
+        )
+      );
+    }
+  }
+  const parsedOptions = typeof query === "string" ? Object.assign({ query }, options) : query;
+  const requestOptions = Object.keys(
+    parsedOptions
+  ).reduce((result, key) => {
+    if (NON_VARIABLE_OPTIONS.includes(key)) {
+      result[key] = parsedOptions[key];
+      return result;
+    }
+    if (!result.variables) {
+      result.variables = {};
+    }
+    result.variables[key] = parsedOptions[key];
+    return result;
+  }, {});
+  const baseUrl = parsedOptions.baseUrl || request2.endpoint.DEFAULTS.baseUrl;
+  if (GHES_V3_SUFFIX_REGEX.test(baseUrl)) {
+    requestOptions.url = baseUrl.replace(GHES_V3_SUFFIX_REGEX, "/api/graphql");
+  }
+  return request2(requestOptions).then((response) => {
+    if (response.data.errors) {
+      const headers = {};
+      for (const key of Object.keys(response.headers)) {
+        headers[key] = response.headers[key];
+      }
+      throw new GraphqlResponseError(
+        requestOptions,
+        headers,
+        response.data
+      );
+    }
+    return response.data.data;
+  });
+}
+
+// pkg/dist-src/with-defaults.js
+function withDefaults(request2, newDefaults) {
+  const newRequest = request2.defaults(newDefaults);
+  const newApi = (query, options) => {
+    return graphql(newRequest, query, options);
+  };
+  return Object.assign(newApi, {
+    defaults: withDefaults.bind(null, newRequest),
+    endpoint: newRequest.endpoint
+  });
+}
+
+// pkg/dist-src/index.js
+var graphql2 = withDefaults(_octokit_request__WEBPACK_IMPORTED_MODULE_0__/* .request */ .E, {
+  headers: {
+    "user-agent": `octokit-graphql.js/${VERSION} ${(0,universal_user_agent__WEBPACK_IMPORTED_MODULE_1__/* .getUserAgent */ .$)()}`
+  },
+  method: "POST",
+  url: "/graphql"
+});
+function withCustomRequest(customRequest) {
+  return withDefaults(customRequest, {
+    method: "POST",
+    url: "/graphql"
+  });
+}
+
+
+
+/***/ }),
+
+/***/ 5230:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+"use strict";
 
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
-  Octokit: () => (/* binding */ dist_src_Octokit)
+  E: () => (/* binding */ request)
 });
 
-;// CONCATENATED MODULE: ./node_modules/.pnpm/universal-user-agent@7.0.3/node_modules/universal-user-agent/index.js
-function getUserAgent() {
-  if (typeof navigator === "object" && "userAgent" in navigator) {
-    return navigator.userAgent;
-  }
-
-  if (typeof process === "object" && process.version !== undefined) {
-    return `Node.js/${process.version.substr(1)} (${process.platform}; ${
-      process.arch
-    })`;
-  }
-
-  return "<environment undetectable>";
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/lib/register.js
-// @ts-check
-
-function register(state, name, method, options) {
-  if (typeof method !== "function") {
-    throw new Error("method for before hook must be a function");
-  }
-
-  if (!options) {
-    options = {};
-  }
-
-  if (Array.isArray(name)) {
-    return name.reverse().reduce((callback, name) => {
-      return register.bind(null, state, name, callback, options);
-    }, method)();
-  }
-
-  return Promise.resolve().then(() => {
-    if (!state.registry[name]) {
-      return method(options);
-    }
-
-    return state.registry[name].reduce((method, registered) => {
-      return registered.hook.bind(null, method, options);
-    }, method)();
-  });
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/lib/add.js
-// @ts-check
-
-function addHook(state, kind, name, hook) {
-  const orig = hook;
-  if (!state.registry[name]) {
-    state.registry[name] = [];
-  }
-
-  if (kind === "before") {
-    hook = (method, options) => {
-      return Promise.resolve()
-        .then(orig.bind(null, options))
-        .then(method.bind(null, options));
-    };
-  }
-
-  if (kind === "after") {
-    hook = (method, options) => {
-      let result;
-      return Promise.resolve()
-        .then(method.bind(null, options))
-        .then((result_) => {
-          result = result_;
-          return orig(result, options);
-        })
-        .then(() => {
-          return result;
-        });
-    };
-  }
-
-  if (kind === "error") {
-    hook = (method, options) => {
-      return Promise.resolve()
-        .then(method.bind(null, options))
-        .catch((error) => {
-          return orig(error, options);
-        });
-    };
-  }
-
-  state.registry[name].push({
-    hook: hook,
-    orig: orig,
-  });
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/lib/remove.js
-// @ts-check
-
-function removeHook(state, name, method) {
-  if (!state.registry[name]) {
-    return;
-  }
-
-  const index = state.registry[name]
-    .map((registered) => {
-      return registered.orig;
-    })
-    .indexOf(method);
-
-  if (index === -1) {
-    return;
-  }
-
-  state.registry[name].splice(index, 1);
-}
-
-;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/index.js
-// @ts-check
-
-
-
-
-
-// bind with array of arguments: https://stackoverflow.com/a/21792913
-const bind = Function.bind;
-const bindable = bind.bind(bind);
-
-function bindApi(hook, state, name) {
-  const removeHookRef = bindable(removeHook, null).apply(
-    null,
-    name ? [state, name] : [state]
-  );
-  hook.api = { remove: removeHookRef };
-  hook.remove = removeHookRef;
-  ["before", "error", "after", "wrap"].forEach((kind) => {
-    const args = name ? [state, kind, name] : [state, kind];
-    hook[kind] = hook.api[kind] = bindable(addHook, null).apply(null, args);
-  });
-}
-
-function Singular() {
-  const singularHookName = Symbol("Singular");
-  const singularHookState = {
-    registry: {},
-  };
-  const singularHook = register.bind(null, singularHookState, singularHookName);
-  bindApi(singularHook, singularHookState, singularHookName);
-  return singularHook;
-}
-
-function Collection() {
-  const state = {
-    registry: {},
-  };
-
-  const hook = register.bind(null, state);
-  bindApi(hook, state);
-
-  return hook;
-}
-
-/* harmony default export */ const before_after_hook = ({ Singular, Collection });
-
+// EXTERNAL MODULE: ./node_modules/.pnpm/universal-user-agent@7.0.3/node_modules/universal-user-agent/index.js
+var universal_user_agent = __nccwpck_require__(2849);
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+endpoint@11.0.0/node_modules/@octokit/endpoint/dist-bundle/index.js
 // pkg/dist-src/defaults.js
 
@@ -45842,7 +46405,7 @@ function Collection() {
 var VERSION = "0.0.0-development";
 
 // pkg/dist-src/defaults.js
-var userAgent = `octokit-endpoint.js/${VERSION} ${getUserAgent()}`;
+var userAgent = `octokit-endpoint.js/${VERSION} ${(0,universal_user_agent/* getUserAgent */.$)()}`;
 var DEFAULTS = {
   method: "GET",
   baseUrl: "https://api.github.com",
@@ -46235,7 +46798,7 @@ var dist_bundle_VERSION = "10.0.3";
 // pkg/dist-src/defaults.js
 var defaults_default = {
   headers: {
-    "user-agent": `octokit-request.js/${dist_bundle_VERSION} ${getUserAgent()}`
+    "user-agent": `octokit-request.js/${dist_bundle_VERSION} ${(0,universal_user_agent/* getUserAgent */.$)()}`
   }
 };
 
@@ -46418,133 +46981,172 @@ function dist_bundle_withDefaults(oldEndpoint, newDefaults) {
 var request = dist_bundle_withDefaults(endpoint, defaults_default);
 
 
-;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+graphql@9.0.1/node_modules/@octokit/graphql/dist-bundle/index.js
-// pkg/dist-src/index.js
 
+/***/ }),
 
+/***/ 8781:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
 
-// pkg/dist-src/version.js
-var graphql_dist_bundle_VERSION = "0.0.0-development";
+"use strict";
+// ESM COMPAT FLAG
+__nccwpck_require__.r(__webpack_exports__);
 
-// pkg/dist-src/with-defaults.js
-
-
-// pkg/dist-src/graphql.js
-
-
-// pkg/dist-src/error.js
-function _buildMessageForResponseErrors(data) {
-  return `Request failed due to following response errors:
-` + data.errors.map((e) => ` - ${e.message}`).join("\n");
-}
-var GraphqlResponseError = class extends Error {
-  constructor(request2, headers, response) {
-    super(_buildMessageForResponseErrors(response));
-    this.request = request2;
-    this.headers = headers;
-    this.response = response;
-    this.errors = response.errors;
-    this.data = response.data;
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, this.constructor);
-    }
-  }
-  name = "GraphqlResponseError";
-  errors;
-  data;
-};
-
-// pkg/dist-src/graphql.js
-var NON_VARIABLE_OPTIONS = [
-  "method",
-  "baseUrl",
-  "url",
-  "headers",
-  "request",
-  "query",
-  "mediaType",
-  "operationName"
-];
-var FORBIDDEN_VARIABLE_OPTIONS = ["query", "method", "url"];
-var GHES_V3_SUFFIX_REGEX = /\/api\/v3\/?$/;
-function graphql(request2, query, options) {
-  if (options) {
-    if (typeof query === "string" && "query" in options) {
-      return Promise.reject(
-        new Error(`[@octokit/graphql] "query" cannot be used as variable name`)
-      );
-    }
-    for (const key in options) {
-      if (!FORBIDDEN_VARIABLE_OPTIONS.includes(key)) continue;
-      return Promise.reject(
-        new Error(
-          `[@octokit/graphql] "${key}" cannot be used as variable name`
-        )
-      );
-    }
-  }
-  const parsedOptions = typeof query === "string" ? Object.assign({ query }, options) : query;
-  const requestOptions = Object.keys(
-    parsedOptions
-  ).reduce((result, key) => {
-    if (NON_VARIABLE_OPTIONS.includes(key)) {
-      result[key] = parsedOptions[key];
-      return result;
-    }
-    if (!result.variables) {
-      result.variables = {};
-    }
-    result.variables[key] = parsedOptions[key];
-    return result;
-  }, {});
-  const baseUrl = parsedOptions.baseUrl || request2.endpoint.DEFAULTS.baseUrl;
-  if (GHES_V3_SUFFIX_REGEX.test(baseUrl)) {
-    requestOptions.url = baseUrl.replace(GHES_V3_SUFFIX_REGEX, "/api/graphql");
-  }
-  return request2(requestOptions).then((response) => {
-    if (response.data.errors) {
-      const headers = {};
-      for (const key of Object.keys(response.headers)) {
-        headers[key] = response.headers[key];
-      }
-      throw new GraphqlResponseError(
-        requestOptions,
-        headers,
-        response.data
-      );
-    }
-    return response.data.data;
-  });
-}
-
-// pkg/dist-src/with-defaults.js
-function graphql_dist_bundle_withDefaults(request2, newDefaults) {
-  const newRequest = request2.defaults(newDefaults);
-  const newApi = (query, options) => {
-    return graphql(newRequest, query, options);
-  };
-  return Object.assign(newApi, {
-    defaults: graphql_dist_bundle_withDefaults.bind(null, newRequest),
-    endpoint: newRequest.endpoint
-  });
-}
-
-// pkg/dist-src/index.js
-var graphql2 = graphql_dist_bundle_withDefaults(request, {
-  headers: {
-    "user-agent": `octokit-graphql.js/${graphql_dist_bundle_VERSION} ${getUserAgent()}`
-  },
-  method: "POST",
-  url: "/graphql"
+// EXPORTS
+__nccwpck_require__.d(__webpack_exports__, {
+  Octokit: () => (/* binding */ dist_src_Octokit)
 });
-function withCustomRequest(customRequest) {
-  return graphql_dist_bundle_withDefaults(customRequest, {
-    method: "POST",
-    url: "/graphql"
+
+// EXTERNAL MODULE: ./node_modules/.pnpm/universal-user-agent@7.0.3/node_modules/universal-user-agent/index.js
+var universal_user_agent = __nccwpck_require__(2849);
+;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/lib/register.js
+// @ts-check
+
+function register(state, name, method, options) {
+  if (typeof method !== "function") {
+    throw new Error("method for before hook must be a function");
+  }
+
+  if (!options) {
+    options = {};
+  }
+
+  if (Array.isArray(name)) {
+    return name.reverse().reduce((callback, name) => {
+      return register.bind(null, state, name, callback, options);
+    }, method)();
+  }
+
+  return Promise.resolve().then(() => {
+    if (!state.registry[name]) {
+      return method(options);
+    }
+
+    return state.registry[name].reduce((method, registered) => {
+      return registered.hook.bind(null, method, options);
+    }, method)();
   });
 }
 
+;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/lib/add.js
+// @ts-check
 
+function addHook(state, kind, name, hook) {
+  const orig = hook;
+  if (!state.registry[name]) {
+    state.registry[name] = [];
+  }
+
+  if (kind === "before") {
+    hook = (method, options) => {
+      return Promise.resolve()
+        .then(orig.bind(null, options))
+        .then(method.bind(null, options));
+    };
+  }
+
+  if (kind === "after") {
+    hook = (method, options) => {
+      let result;
+      return Promise.resolve()
+        .then(method.bind(null, options))
+        .then((result_) => {
+          result = result_;
+          return orig(result, options);
+        })
+        .then(() => {
+          return result;
+        });
+    };
+  }
+
+  if (kind === "error") {
+    hook = (method, options) => {
+      return Promise.resolve()
+        .then(method.bind(null, options))
+        .catch((error) => {
+          return orig(error, options);
+        });
+    };
+  }
+
+  state.registry[name].push({
+    hook: hook,
+    orig: orig,
+  });
+}
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/lib/remove.js
+// @ts-check
+
+function removeHook(state, name, method) {
+  if (!state.registry[name]) {
+    return;
+  }
+
+  const index = state.registry[name]
+    .map((registered) => {
+      return registered.orig;
+    })
+    .indexOf(method);
+
+  if (index === -1) {
+    return;
+  }
+
+  state.registry[name].splice(index, 1);
+}
+
+;// CONCATENATED MODULE: ./node_modules/.pnpm/before-after-hook@4.0.0/node_modules/before-after-hook/index.js
+// @ts-check
+
+
+
+
+
+// bind with array of arguments: https://stackoverflow.com/a/21792913
+const bind = Function.bind;
+const bindable = bind.bind(bind);
+
+function bindApi(hook, state, name) {
+  const removeHookRef = bindable(removeHook, null).apply(
+    null,
+    name ? [state, name] : [state]
+  );
+  hook.api = { remove: removeHookRef };
+  hook.remove = removeHookRef;
+  ["before", "error", "after", "wrap"].forEach((kind) => {
+    const args = name ? [state, kind, name] : [state, kind];
+    hook[kind] = hook.api[kind] = bindable(addHook, null).apply(null, args);
+  });
+}
+
+function Singular() {
+  const singularHookName = Symbol("Singular");
+  const singularHookState = {
+    registry: {},
+  };
+  const singularHook = register.bind(null, singularHookState, singularHookName);
+  bindApi(singularHook, singularHookState, singularHookName);
+  return singularHook;
+}
+
+function Collection() {
+  const state = {
+    registry: {},
+  };
+
+  const hook = register.bind(null, state);
+  bindApi(hook, state);
+
+  return hook;
+}
+
+/* harmony default export */ const before_after_hook = ({ Singular, Collection });
+
+// EXTERNAL MODULE: ./node_modules/.pnpm/@octokit+request@10.0.3/node_modules/@octokit/request/dist-bundle/index.js + 2 modules
+var dist_bundle = __nccwpck_require__(5230);
+// EXTERNAL MODULE: ./node_modules/.pnpm/@octokit+graphql@9.0.1/node_modules/@octokit/graphql/dist-bundle/index.js
+var graphql_dist_bundle = __nccwpck_require__(6489);
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+auth-token@6.0.0/node_modules/@octokit/auth-token/dist-bundle/index.js
 // pkg/dist-src/is-jwt.js
 var b64url = "(?:[a-zA-Z0-9_-]+)";
@@ -46601,7 +47203,7 @@ var createTokenAuth = function createTokenAuth2(token) {
 
 
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+core@7.0.3/node_modules/@octokit/core/dist-src/version.js
-const version_VERSION = "7.0.3";
+const VERSION = "7.0.3";
 
 
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+core@7.0.3/node_modules/@octokit/core/dist-src/index.js
@@ -46630,9 +47232,9 @@ function createLogger(logger = {}) {
   }
   return logger;
 }
-const userAgentTrail = `octokit-core.js/${version_VERSION} ${getUserAgent()}`;
+const userAgentTrail = `octokit-core.js/${VERSION} ${(0,universal_user_agent/* getUserAgent */.$)()}`;
 class Octokit {
-  static VERSION = version_VERSION;
+  static VERSION = VERSION;
   static defaults(defaults) {
     const OctokitWithDefaults = class extends this {
       constructor(...args) {
@@ -46674,7 +47276,7 @@ class Octokit {
   constructor(options = {}) {
     const hook = new before_after_hook.Collection();
     const requestDefaults = {
-      baseUrl: request.endpoint.DEFAULTS.baseUrl,
+      baseUrl: dist_bundle/* request */.E.endpoint.DEFAULTS.baseUrl,
       headers: {},
       request: Object.assign({}, options.request, {
         // @ts-ignore internal usage only, no need to type
@@ -46695,8 +47297,8 @@ class Octokit {
     if (options.timeZone) {
       requestDefaults.headers["time-zone"] = options.timeZone;
     }
-    this.request = request.defaults(requestDefaults);
-    this.graphql = withCustomRequest(this.request).defaults(requestDefaults);
+    this.request = dist_bundle/* request */.E.defaults(requestDefaults);
+    this.graphql = (0,graphql_dist_bundle.withCustomRequest)(this.request).defaults(requestDefaults);
     this.log = createLogger(options.log);
     this.hook = hook;
     if (!options.authStrategy) {
@@ -46746,7 +47348,7 @@ class Octokit {
 
 
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+plugin-request-log@6.0.0_@octokit+core@7.0.3/node_modules/@octokit/plugin-request-log/dist-src/version.js
-const dist_src_version_VERSION = "6.0.0";
+const version_VERSION = "6.0.0";
 
 
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+plugin-request-log@6.0.0_@octokit+core@7.0.3/node_modules/@octokit/plugin-request-log/dist-src/index.js
@@ -46772,12 +47374,12 @@ function requestLog(octokit) {
     });
   });
 }
-requestLog.VERSION = dist_src_version_VERSION;
+requestLog.VERSION = version_VERSION;
 
 
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+plugin-paginate-rest@13.1.1_@octokit+core@7.0.3/node_modules/@octokit/plugin-paginate-rest/dist-bundle/index.js
 // pkg/dist-src/version.js
-var plugin_paginate_rest_dist_bundle_VERSION = "0.0.0-development";
+var dist_bundle_VERSION = "0.0.0-development";
 
 // pkg/dist-src/normalize-paginated-list-response.js
 function normalizePaginatedListResponse(response) {
@@ -47172,11 +47774,11 @@ function paginateRest(octokit) {
     })
   };
 }
-paginateRest.VERSION = plugin_paginate_rest_dist_bundle_VERSION;
+paginateRest.VERSION = dist_bundle_VERSION;
 
 
 ;// CONCATENATED MODULE: ./node_modules/.pnpm/@octokit+plugin-rest-endpoint-methods@16.0.0_@octokit+core@7.0.3/node_modules/@octokit/plugin-rest-endpoint-methods/dist-src/version.js
-const plugin_rest_endpoint_methods_dist_src_version_VERSION = "16.0.0";
+const dist_src_version_VERSION = "16.0.0";
 
 //# sourceMappingURL=version.js.map
 
@@ -49422,7 +50024,7 @@ function restEndpointMethods(octokit) {
     rest: api
   };
 }
-restEndpointMethods.VERSION = plugin_rest_endpoint_methods_dist_src_version_VERSION;
+restEndpointMethods.VERSION = dist_src_version_VERSION;
 function legacyRestEndpointMethods(octokit) {
   const api = endpointsToMethods(octokit);
   return {
@@ -49430,7 +50032,7 @@ function legacyRestEndpointMethods(octokit) {
     rest: api
   };
 }
-legacyRestEndpointMethods.VERSION = plugin_rest_endpoint_methods_dist_src_version_VERSION;
+legacyRestEndpointMethods.VERSION = dist_src_version_VERSION;
 
 //# sourceMappingURL=index.js.map
 
@@ -49450,6 +50052,30 @@ const dist_src_Octokit = Octokit.plugin(requestLog, legacyRestEndpointMethods, p
   }
 );
 
+
+
+/***/ }),
+
+/***/ 2849:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
+
+"use strict";
+/* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
+/* harmony export */   $: () => (/* binding */ getUserAgent)
+/* harmony export */ });
+function getUserAgent() {
+  if (typeof navigator === "object" && "userAgent" in navigator) {
+    return navigator.userAgent;
+  }
+
+  if (typeof process === "object" && process.version !== undefined) {
+    return `Node.js/${process.version.substr(1)} (${process.platform}; ${
+      process.arch
+    })`;
+  }
+
+  return "<environment undetectable>";
+}
 
 
 /***/ }),
@@ -49482,7 +50108,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.0","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.1","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0","@octokit/graphql":"9.0.1"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

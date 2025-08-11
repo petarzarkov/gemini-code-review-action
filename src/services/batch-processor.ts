@@ -1,11 +1,10 @@
+import { ReviewComment } from "../types/github";
+import { FileData, HunkData } from "../types/diff";
 import {
-  FileData,
-  HunkData,
   AiReviewResponse,
   BatchReviewRequest,
   BatchFileContent,
-  ReviewComment,
-} from "../types/code-review";
+} from "../types/ai";
 import { logger } from "../utils/logger";
 
 export class BatchProcessor {

@@ -1,31 +1,22 @@
 import { AIService } from "./services/ai-service";
-import { GitHubService } from "./services/github-service";
+import { GitHubService } from "./services/github/index";
 import { BatchProcessor } from "./services/batch-processor";
-import {
-  PullRequestDetails,
-  FileData,
-  ReviewComment,
-  ConversationContext,
-} from "./types/code-review";
+import { FileFilterService } from "./services/file-filter-service";
+import { CodeAnalysisService } from "./services/code-analysis-service";
+import { ConversationContext } from "./types/conversation";
 import { logger } from "./utils/logger";
-import {
-  matchesPattern,
-  parseExcludePatterns,
-  parseDiffToFileData,
-  createCommentsFromAiResponses,
-} from "./utils/helpers";
+import { parseExcludePatterns, parseDiffToFileData } from "./utils/helpers";
 import {
   createContextSummary,
   logContextStats,
+  filterResolvedCodeSections,
 } from "./utils/conversation-context";
 import pkg from "../package.json";
 
 export class CodeReviewService {
   private readonly githubService: GitHubService;
-  private readonly aiService: AIService;
-  private readonly batchProcessor: BatchProcessor;
-  private readonly excludePatterns: string[];
-
+  private readonly fileFilterService: FileFilterService;
+  private readonly codeAnalysisService: CodeAnalysisService;
   private readonly enableConversationContext: boolean;
   private readonly skipDraftPrs: boolean;
 
@@ -38,9 +29,15 @@ export class CodeReviewService {
     skipDraftPrs: boolean = true
   ) {
     this.githubService = new GitHubService(githubToken);
-    this.aiService = new AIService(geminiApiKey, model);
-    this.batchProcessor = new BatchProcessor();
-    this.excludePatterns = excludePatterns;
+    this.fileFilterService = new FileFilterService(excludePatterns);
+
+    const aiService = new AIService(geminiApiKey, model);
+    const batchProcessor = new BatchProcessor();
+    this.codeAnalysisService = new CodeAnalysisService(
+      aiService,
+      batchProcessor
+    );
+
     this.enableConversationContext = enableConversationContext;
     this.skipDraftPrs = skipDraftPrs;
   }
@@ -89,7 +86,33 @@ export class CodeReviewService {
       }
 
       const parsedDiff = parseDiffToFileData(diff);
-      const filteredDiff = this.filterFilesByExcludePatterns(parsedDiff);
+      let filteredDiff =
+        this.fileFilterService.filterFilesByExcludePatterns(parsedDiff);
+
+      // Filter out resolved code sections if conversation context is enabled
+      if (
+        this.enableConversationContext &&
+        conversationContext?.resolvedComments
+      ) {
+        const beforeCount = filteredDiff.reduce(
+          (acc, file) => acc + file.hunks.length,
+          0
+        );
+        filteredDiff = filterResolvedCodeSections(
+          filteredDiff,
+          conversationContext.resolvedComments
+        );
+        const afterCount = filteredDiff.reduce(
+          (acc, file) => acc + file.hunks.length,
+          0
+        );
+
+        if (beforeCount > afterCount) {
+          logger.info(
+            `Filtered out ${beforeCount - afterCount} resolved code hunks`
+          );
+        }
+      }
 
       logger.info(
         `Files to analyze after filtering: ${filteredDiff
@@ -97,7 +120,7 @@ export class CodeReviewService {
           .join(", ")}`
       );
 
-      const comments = await this.analyzeCodeChanges(
+      const comments = await this.codeAnalysisService.analyzeCodeChanges(
         filteredDiff,
         prDetails,
         conversationContext
@@ -161,163 +184,6 @@ export class CodeReviewService {
       logger.error("Error in code review process:", error);
       throw error;
     }
-  }
-
-  private filterFilesByExcludePatterns(files: FileData[]): FileData[] {
-    if (this.excludePatterns.length === 0) {
-      return files;
-    }
-
-    return files.filter((file) => {
-      const shouldExclude = this.excludePatterns.some((pattern) =>
-        matchesPattern(file.path, pattern)
-      );
-
-      if (shouldExclude) {
-        logger.debug(`Excluding file: ${file.path}`);
-        return false;
-      }
-
-      return true;
-    });
-  }
-
-  private async analyzeCodeChanges(
-    files: FileData[],
-    prDetails: PullRequestDetails,
-    conversationContext?: ConversationContext
-  ): Promise<ReviewComment[]> {
-    logger.processing(`Starting analysis of ${files.length} files`);
-
-    // Decide whether to use batch processing or individual file processing
-    if (this.batchProcessor.shouldUseBatching(files)) {
-      return this.analyzeBatchMode(files, prDetails, conversationContext);
-    } else {
-      return this.analyzeIndividualMode(files, prDetails, conversationContext);
-    }
-  }
-
-  private async analyzeBatchMode(
-    files: FileData[],
-    prDetails: PullRequestDetails,
-    conversationContext?: ConversationContext
-  ): Promise<ReviewComment[]> {
-    logger.info("Using batch processing mode for performance optimization");
-
-    const batches = this.batchProcessor.createBatches(files);
-    const allComments: ReviewComment[] = [];
-
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      logger.processing(
-        `Processing batch ${i + 1}/${batches.length} (${
-          batch.files.length
-        } files)`
-      );
-
-      try {
-        const aiResponses = await this.aiService.reviewBatch(
-          batch,
-          prDetails,
-          conversationContext
-        );
-        const comments = this.batchProcessor.createCommentsFromBatchResponse(
-          batch,
-          aiResponses
-        );
-        allComments.push(...comments);
-
-        logger.info(`Batch ${i + 1} generated ${comments.length} comments`);
-      } catch (error) {
-        logger.error(`Error processing batch ${i + 1}:`, error);
-
-        // Fallback: try individual file processing for this batch
-        logger.info(`Falling back to individual processing for batch ${i + 1}`);
-        const fallbackComments = await this.processBatchFilesIndividually(
-          batch.files.map((f) => ({ path: f.path, hunks: f.originalHunks })),
-          prDetails,
-          conversationContext
-        );
-        allComments.push(...fallbackComments);
-      }
-    }
-
-    logger.success(
-      `Batch processing generated ${allComments.length} total comments`
-    );
-    return allComments;
-  }
-
-  private async analyzeIndividualMode(
-    files: FileData[],
-    prDetails: PullRequestDetails,
-    conversationContext?: ConversationContext
-  ): Promise<ReviewComment[]> {
-    logger.info("Using individual file processing mode");
-    return this.processBatchFilesIndividually(
-      files,
-      prDetails,
-      conversationContext
-    );
-  }
-
-  private async processBatchFilesIndividually(
-    files: FileData[],
-    prDetails: PullRequestDetails,
-    conversationContext?: ConversationContext
-  ): Promise<ReviewComment[]> {
-    const allComments: ReviewComment[] = [];
-    let hunkCount = 0;
-    let totalHunks = 0;
-
-    // Count total hunks for progress tracking
-    for (const file of files) {
-      if (file.path && file.path !== "/dev/null") {
-        totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
-      }
-    }
-
-    logger.info(`Processing ${totalHunks} hunks individually`);
-
-    for (const file of files) {
-      logger.info(`Processing file: ${file.path}`);
-
-      if (!file.path || file.path === "/dev/null") {
-        continue;
-      }
-
-      for (const hunk of file.hunks) {
-        if (hunk.lines.length === 0) {
-          continue;
-        }
-
-        hunkCount++;
-        logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
-
-        try {
-          const hunkContent = hunk.lines.join("\n");
-          const aiResponses = await this.aiService.reviewSingle(
-            file.path,
-            hunkContent,
-            prDetails,
-            conversationContext
-          );
-          const comments = createCommentsFromAiResponses(
-            file.path,
-            hunk,
-            aiResponses
-          );
-          allComments.push(...comments);
-        } catch (error) {
-          logger.error(`Error processing hunk ${hunkCount}:`, error);
-        }
-      }
-    }
-
-    logger.success(
-      `Individual processing generated ${allComments.length} comments`
-    );
-    return allComments;
   }
 }
 

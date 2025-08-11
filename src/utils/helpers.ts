@@ -1,9 +1,6 @@
-import {
-  FileData,
-  HunkData,
-  ReviewComment,
-  AiReviewResponse,
-} from "../types/code-review";
+import { ReviewComment } from "../types/github";
+import { FileData, HunkData } from "../types/diff";
+import { AiReviewResponse } from "../types/ai";
 import parseDiff, {
   ParsedFile,
   DiffChunk,

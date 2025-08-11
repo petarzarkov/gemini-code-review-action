@@ -29,7 +29,8 @@ const basePromptRules = `You are an expert senior software engineer acting as a 
 
 1.  **Focus:** Concentrate on finding genuine bugs, security vulnerabilities, performance bottlenecks, and deviations from best practices.
 2.  **No Nitpicking:** Do not comment on trivial style preferences unless they violate a clear best practice.
-3.  **No Comment Suggestions:** IMPORTANT: NEVER suggest that the developer add more comments to their code.`;
+3.  **No Comment Suggestions:** IMPORTANT: NEVER suggest that the developer add more comments to their code.
+4.  **Resolved Issues:** If conversation context shows resolved issues, do NOT review those same code sections again unless there are new changes. Focus only on unresolved or newly introduced code.`;
 
 const singleFileLineRules = `**LINE NUMBERING RULES:**
 

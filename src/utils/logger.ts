@@ -13,28 +13,25 @@ export const colors = {
 } as const;
 
 export const logger = {
-  verbose: (message: string): void => {
-    console.log(`${colors.magenta}ℹ ${message}${colors.reset}`);
+  verbose: (message: string, meta?: unknown): void => {
+    console.log(`${colors.magenta}ℹ ${message}${colors.reset}`, meta || "");
   },
-  info: (message: string): void => {
-    console.log(`${colors.blue}ℹ ${message}${colors.reset}`);
+  info: (message: string, meta?: unknown): void => {
+    console.log(`${colors.blue}ℹ ${message}${colors.reset}`, meta || "");
   },
-  success: (message: string): void => {
-    console.log(`${colors.green}✓ ${message}${colors.reset}`);
+  success: (message: string, meta?: unknown): void => {
+    console.log(`${colors.green}✓ ${message}${colors.reset}`, meta || "");
   },
-  warn: (message: string): void => {
-    console.log(`${colors.yellow}⚠ ${message}${colors.reset}`);
+  warn: (message: string, meta?: unknown): void => {
+    console.log(`${colors.yellow}⚠ ${message}${colors.reset}`, meta || "");
   },
-  error: (message: string, error?: unknown): void => {
-    console.log(`${colors.red}✗ ${message}${colors.reset}`);
-    if (error) {
-      console.error(error);
-    }
+  error: (message: string, meta?: unknown): void => {
+    console.log(`${colors.red}✗ ${message}${colors.reset}`, meta || "");
   },
-  processing: (message: string): void => {
-    console.log(`${colors.cyan}⚙ ${message}${colors.reset}`);
+  processing: (message: string, meta?: unknown): void => {
+    console.log(`${colors.cyan}⚙ ${message}${colors.reset}`, meta || "");
   },
-  debug: (message: string): void => {
-    console.log(`${colors.gray}🔍 ${message}${colors.reset}`);
+  debug: (message: string, meta?: unknown): void => {
+    console.log(`${colors.gray}🔍 ${message}${colors.reset}`, meta || "");
   },
 };

@@ -8,16 +8,6 @@ export interface PullRequestDetails {
   description: string;
 }
 
-export interface HunkData {
-  header: string;
-  lines: string[];
-}
-
-export interface FileData {
-  path: string;
-  hunks: HunkData[];
-}
-
 export type ReviewCommentData =
   RestEndpointMethodTypes["pulls"]["listReviewComments"]["response"]["data"][number];
 
@@ -35,38 +25,6 @@ export type ReviewComment = Exclude<
 export type CommitData =
   RestEndpointMethodTypes["pulls"]["listCommits"]["response"]["data"][number];
 
-export interface ConversationContext {
-  previousReviews: ReviewData[];
-  previousComments: ReviewCommentData[];
-  conversationHistory: CommentData[];
-  commits: CommitData[];
-}
-
-export interface AiReviewResponse {
-  lineContent: string;
-  reviewComment: string;
-}
-
-export interface AiResponseData {
-  reviews: AiReviewResponse[];
-}
-
-export interface BatchAiResponseData {
-  reviews: AiReviewResponse[];
-}
-
-export interface BatchFileContent {
-  path: string;
-  content: string;
-  estimatedTokens: number;
-  originalHunks: HunkData[];
-}
-
-export interface BatchReviewRequest {
-  files: BatchFileContent[];
-  totalEstimatedTokens: number;
-}
-
 export interface GitHubEventData {
   number?: number;
   repository: {
@@ -77,5 +35,45 @@ export interface GitHubEventData {
     body: string;
     number: number;
     draft: boolean;
+  };
+}
+
+// GraphQL types for review thread resolution
+export interface GraphQLReviewThread {
+  id: string;
+  isResolved: boolean;
+  resolvedBy?: {
+    login: string;
+  };
+  comments: {
+    nodes: GraphQLReviewComment[];
+  };
+}
+
+export interface GraphQLReviewComment {
+  id: string;
+  databaseId: number;
+  body: string;
+  path: string;
+  line?: number;
+  position?: number;
+  createdAt: string;
+  updatedAt: string;
+  author?: {
+    login: string;
+  };
+}
+
+export interface GraphQLPullRequestReviewThreads {
+  repository: {
+    pullRequest: {
+      reviewThreads: {
+        nodes: GraphQLReviewThread[];
+        pageInfo: {
+          hasNextPage: boolean;
+          endCursor?: string;
+        };
+      };
+    };
   };
 }

@@ -11,6 +11,9 @@ importers:
       '@google/genai':
         specifier: 1.13.0
         version: 1.13.0
+      '@octokit/graphql':
+        specifier: 9.0.1
+        version: 9.0.1
       '@octokit/rest':
         specifier: 22.0.0
         version: 22.0.0
