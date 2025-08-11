@@ -26,12 +26,13 @@ export class CodeReviewService {
     excludePatterns: string[] = [],
     model?: string,
     enableConversationContext: boolean = true,
-    skipDraftPrs: boolean = true
+    skipDraftPrs: boolean = true,
+    language?: string
   ) {
     this.githubService = new GitHubService(githubToken);
     this.fileFilterService = new FileFilterService(excludePatterns);
 
-    const aiService = new AIService(geminiApiKey, model);
+    const aiService = new AIService(geminiApiKey, model, language);
     const batchProcessor = new BatchProcessor();
     this.codeAnalysisService = new CodeAnalysisService(
       aiService,
@@ -199,6 +200,7 @@ async function main(): Promise<void> {
       ).toLowerCase() === "true";
     const skipDraftPrs =
       (process.env.INPUT_SKIP_DRAFT_PRS || "true").toLowerCase() === "true";
+    const language = process.env.INPUT_LANGUAGE;
 
     if (!githubToken) {
       throw new Error("GITHUB_TOKEN environment variable is required");
@@ -225,7 +227,8 @@ async function main(): Promise<void> {
       excludePatterns,
       model,
       enableConversationContext,
-      skipDraftPrs
+      skipDraftPrs,
+      language
     );
     await codeReviewService.processCodeReview();
 

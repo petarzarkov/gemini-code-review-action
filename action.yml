@@ -23,6 +23,10 @@ inputs:
     required: false
     default: "true"
 
+  language:
+    description: "The language for AI responses (e.g., 'English', 'Spanish', 'French', 'German', etc.). The AI will provide code review comments in the specified language."
+    required: false
+
 runs:
   using: "node20"
   main: "dist/index.js"

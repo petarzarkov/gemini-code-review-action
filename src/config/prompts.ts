@@ -4,6 +4,7 @@ export interface SingleReviewContext {
   filePath: string;
   hunkContent: string;
   conversationContext?: string;
+  language?: string;
 }
 
 export interface BatchReviewContext {
@@ -12,6 +13,7 @@ export interface BatchReviewContext {
   filesContent: string;
   fileCount: number;
   conversationContext?: string;
+  language?: string;
 }
 
 const basePromptRules = `You are an expert senior software engineer acting as a meticulous code reviewer. Your purpose is to identify potential issues in pull requests and provide constructive feedback.
@@ -67,7 +69,15 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 </CONVERSATION_CONTEXT>`
     : "";
 
-  return `${basePromptRules}
+  const languageInstruction = context.language
+    ? `
+
+---
+
+Always answer in ${context.language}`
+    : "";
+
+  return `${basePromptRules}${languageInstruction}
 
 ${singleFileLineRules}
 
@@ -107,7 +117,15 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 </CONVERSATION_CONTEXT>`
     : "";
 
-  return `${basePromptRules}
+  const languageInstruction = context.language
+    ? `
+
+---
+
+Always answer in ${context.language}`
+    : "";
+
+  return `${basePromptRules}${languageInstruction}
 
 ${batchFileLineRules}
 

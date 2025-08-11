@@ -11,6 +11,7 @@ async function testCodeReview(): Promise<void> {
     const geminiApiKey = process.env.GEMINI_API_KEY;
     const excludeInput = process.env.INPUT_EXCLUDE || "";
     const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
+    const language = process.env.INPUT_LANGUAGE;
 
     if (!githubToken) {
       throw new Error("GITHUB_TOKEN environment variable is required");
@@ -60,7 +61,10 @@ async function testCodeReview(): Promise<void> {
       githubToken,
       geminiApiKey,
       excludePatterns,
-      model
+      model,
+      true, // enableConversationContext
+      true, // skipDraftPrs
+      language
     );
 
     console.log("Starting code review process...\n");

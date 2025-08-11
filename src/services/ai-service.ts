@@ -24,11 +24,13 @@ export class AIService {
   private readonly modelHierarchy: string[];
   private lastRequestTime: number = 0;
   private rateLimitDelay: number = 0;
+  private readonly language?: string;
 
-  constructor(geminiApiKey: string, model?: string) {
+  constructor(geminiApiKey: string, model?: string, language?: string) {
     this.genAi = new GoogleGenAI({ apiKey: geminiApiKey });
     this.currentModelName =
       model || process.env.GEMINI_MODEL || "gemini-2.5-pro";
+    this.language = language;
 
     this.rpmLimits = {
       "gemini-2.5-pro": 5,
@@ -166,6 +168,7 @@ export class AIService {
       filesContent,
       fileCount: batch.files.length,
       conversationContext: contextString,
+      language: this.language,
     });
   }
 
@@ -186,6 +189,7 @@ export class AIService {
       description: prDetails.description || "No description provided",
       hunkContent,
       conversationContext: contextString,
+      language: this.language,
     });
   }
 

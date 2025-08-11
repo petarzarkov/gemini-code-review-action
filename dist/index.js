@@ -25100,10 +25100,10 @@ class CodeReviewService {
     codeAnalysisService;
     enableConversationContext;
     skipDraftPrs;
-    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true, skipDraftPrs = true) {
+    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true, skipDraftPrs = true, language) {
         this.githubService = new index_1.GitHubService(githubToken);
         this.fileFilterService = new file_filter_service_1.FileFilterService(excludePatterns);
-        const aiService = new ai_service_1.AIService(geminiApiKey, model);
+        const aiService = new ai_service_1.AIService(geminiApiKey, model, language);
         const batchProcessor = new batch_processor_1.BatchProcessor();
         this.codeAnalysisService = new code_analysis_service_1.CodeAnalysisService(aiService, batchProcessor);
         this.enableConversationContext = enableConversationContext;
@@ -25190,6 +25190,7 @@ async function main() {
         const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
         const enableConversationContext = (process.env.INPUT_ENABLE_CONVERSATION_CONTEXT || "true").toLowerCase() === "true";
         const skipDraftPrs = (process.env.INPUT_SKIP_DRAFT_PRS || "true").toLowerCase() === "true";
+        const language = process.env.INPUT_LANGUAGE;
         if (!githubToken) {
             throw new Error("GITHUB_TOKEN environment variable is required");
         }
@@ -25198,7 +25199,7 @@ async function main() {
         }
         const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
         logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, conversation context: ${enableConversationContext ? "enabled" : "disabled"}, skip draft PRs: ${skipDraftPrs ? "enabled" : "disabled"}, exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext, skipDraftPrs);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext, skipDraftPrs, language);
         await codeReviewService.processCodeReview();
         logger_1.logger.success("✨ Code Review completed successfully!");
     }
@@ -25271,7 +25272,14 @@ ${context.conversationContext}
 Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
 </CONVERSATION_CONTEXT>`
         : "";
-    return `${basePromptRules}
+    const languageInstruction = context.language
+        ? `
+
+---
+
+Always answer in ${context.language}`
+        : "";
+    return `${basePromptRules}${languageInstruction}
 
 ${singleFileLineRules}
 
@@ -25309,7 +25317,14 @@ ${context.conversationContext}
 Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
 </CONVERSATION_CONTEXT>`
         : "";
-    return `${basePromptRules}
+    const languageInstruction = context.language
+        ? `
+
+---
+
+Always answer in ${context.language}`
+        : "";
+    return `${basePromptRules}${languageInstruction}
 
 ${batchFileLineRules}
 
@@ -25609,10 +25624,12 @@ class AIService {
     modelHierarchy;
     lastRequestTime = 0;
     rateLimitDelay = 0;
-    constructor(geminiApiKey, model) {
+    language;
+    constructor(geminiApiKey, model, language) {
         this.genAi = new genai_1.GoogleGenAI({ apiKey: geminiApiKey });
         this.currentModelName =
             model || process.env.GEMINI_MODEL || "gemini-2.5-pro";
+        this.language = language;
         this.rpmLimits = {
             "gemini-2.5-pro": 5,
             "gemini-2.5-flash": 10,
@@ -25686,6 +25703,7 @@ class AIService {
             filesContent,
             fileCount: batch.files.length,
             conversationContext: contextString,
+            language: this.language,
         });
     }
     createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext) {
@@ -25698,6 +25716,7 @@ class AIService {
             description: prDetails.description || "No description provided",
             hunkContent,
             conversationContext: contextString,
+            language: this.language,
         });
     }
     async getAiResponse(prompt, isBatch, retryCount = 0) {
@@ -50108,7 +50127,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.2","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0","@octokit/graphql":"9.0.1"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.3","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0","@octokit/graphql":"9.0.1"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

@@ -48,6 +48,9 @@ jobs:
 
           # Optional: Skip code review for draft pull requests (default: true)
           skip_draft_prs: true
+
+          # Optional: Set the language for AI responses (e.g., English, Spanish, French)
+          language: English
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,12 +82,13 @@ When enabled (default), the action maintains context across multiple reviews:
 
 The action's behavior can be customized with the following inputs:
 
-| Input                         | Description                                                                                                    | Default                                                                                         |
-| :---------------------------- | :------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- |
-| `exclude`                     | A comma-separated list of glob patterns for files to exclude from the review.                                  | `*.md,*.json,package-lock.json,*.yaml,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*` |
-| `model`                       | The Gemini model to use for code review. See [available models](https://ai.google.dev/gemini-api/docs/models). | `gemini-2.5-pro`                                                                                |
-| `enable_conversation_context` | Enable conversation context to maintain discussion continuity across multiple PR reviews.                      | `true`                                                                                          |
-| `skip_draft_prs`              | Whether to skip code review for draft pull requests. When true, the action will not review draft PRs.          | `true`                                                                                          |
+| Input                         | Description                                                                                                                                              | Default                                                                                         |
+| :---------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- |
+| `exclude`                     | A comma-separated list of glob patterns for files to exclude from the review.                                                                            | `*.md,*.json,package-lock.json,*.yaml,*.test.ts,migrations/*,*.spec.ts,*.e2e.ts,test/*,tests/*` |
+| `model`                       | The Gemini model to use for code review. See [available models](https://ai.google.dev/gemini-api/docs/models).                                           | `gemini-2.5-pro`                                                                                |
+| `enable_conversation_context` | Enable conversation context to maintain discussion continuity across multiple PR reviews.                                                                | `true`                                                                                          |
+| `skip_draft_prs`              | Whether to skip code review for draft pull requests. When true, the action will not review draft PRs.                                                    | `true`                                                                                          |
+| `language`                    | The language for AI responses (e.g., 'English', 'Spanish', 'French', 'German', etc.). When not specified, the AI will use its default language behavior. | Not set (AI uses default language)                                                              |
 
 ## Secrets
 
