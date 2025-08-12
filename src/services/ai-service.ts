@@ -133,13 +133,15 @@ export class AIService {
     filePath: string,
     hunkContent: string,
     prDetails: PullRequestDetails,
-    conversationContext?: ConversationContext
+    conversationContext?: ConversationContext,
+    fullFileContent?: string
   ): Promise<AiReviewResponse[]> {
     const prompt = this.createSingleReviewPrompt(
       filePath,
       hunkContent,
       prDetails,
-      conversationContext
+      conversationContext,
+      fullFileContent
     );
     const aiResponses = await this.getAiResponse(prompt, false);
     return aiResponses;
@@ -150,11 +152,19 @@ export class AIService {
     prDetails: PullRequestDetails,
     conversationContext?: ConversationContext
   ): string {
+    const hasFullContext = batch.files.some((file) => file.fullFileContent);
+
     const filesContent = batch.files
-      .map(
-        (file, index) =>
-          `File ${index + 1}: ${file.path}\n\`\`\`diff\n${file.content}\n\`\`\``
-      )
+      .map((file, index) => {
+        let content = `File ${index + 1}: ${file.path}\n`;
+
+        if (file.fullFileContent) {
+          content += `\n**FULL FILE CONTENT:**\n\`\`\`\n${file.fullFileContent}\n\`\`\`\n`;
+        }
+
+        content += `\n**DIFF TO REVIEW:**\n\`\`\`diff\n${file.content}\n\`\`\``;
+        return content;
+      })
       .join("\n\n");
 
     const contextString =
@@ -167,6 +177,7 @@ export class AIService {
       description: prDetails.description || "No description provided",
       filesContent,
       fileCount: batch.files.length,
+      fullContextAvailable: hasFullContext,
       conversationContext: contextString,
       language: this.language,
     });
@@ -176,7 +187,8 @@ export class AIService {
     filePath: string,
     hunkContent: string,
     prDetails: PullRequestDetails,
-    conversationContext?: ConversationContext
+    conversationContext?: ConversationContext,
+    fullFileContent?: string
   ): string {
     const contextString =
       conversationContext && shouldIncludeContext(conversationContext)
@@ -188,6 +200,7 @@ export class AIService {
       title: prDetails.title,
       description: prDetails.description || "No description provided",
       hunkContent,
+      fullFileContent,
       conversationContext: contextString,
       language: this.language,
     });

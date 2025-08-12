@@ -18,6 +18,7 @@ export interface BatchFileContent {
   content: string;
   estimatedTokens: number;
   originalHunks: HunkData[];
+  fullFileContent?: string; // Complete file content for better AI context
 }
 
 export interface BatchReviewRequest {

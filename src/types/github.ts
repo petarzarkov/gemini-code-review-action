@@ -6,6 +6,7 @@ export interface PullRequestDetails {
   pullNumber: number;
   title: string;
   description: string;
+  headSha?: string; // HEAD commit SHA for file content retrieval
 }
 
 export type ReviewCommentData =
@@ -35,6 +36,9 @@ export interface GitHubEventData {
     body: string;
     number: number;
     draft: boolean;
+    head?: {
+      sha: string;
+    };
   };
 }
 

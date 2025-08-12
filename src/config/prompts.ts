@@ -3,6 +3,7 @@ export interface SingleReviewContext {
   description: string;
   filePath: string;
   hunkContent: string;
+  fullFileContent?: string; // Complete file content for better context
   conversationContext?: string;
   language?: string;
 }
@@ -12,6 +13,7 @@ export interface BatchReviewContext {
   description: string;
   filesContent: string;
   fileCount: number;
+  fullContextAvailable?: boolean; // Indicates if file contents include full context
   conversationContext?: string;
   language?: string;
 }
@@ -37,8 +39,9 @@ const basePromptRules = `You are an expert senior software engineer acting as a 
 const singleFileLineRules = `**LINE NUMBERING RULES:**
 
 1.  **Target Added Lines Only:** You MUST only comment on lines that begin with a \`+\` in the diff. NEVER comment on lines starting with \`-\` or a space.
-2.  **1-Based Indexing:** The \`lineNumber\` MUST correspond to the line's position within the provided diff hunk. The first line of the hunk is 1, the second is 2, and so on.
-3.  **Example:** In the hunk below, you could only comment on lines 2, 4, or 5.
+2.  **1-Based Indexing:** The \`lineNumber\` MUST correspond to the line's position within the provided diff. The first line is 1, the second is 2, and so on.
+3.  **Multiple Hunks:** If multiple hunks are provided, treat them as one continuous diff for line numbering purposes.
+4.  **Example:** In the diff below, you could only comment on lines 2, 4, or 5.
     \`\`\`diff
     1   - const oldVar = 1;
     2   + const newVar = 2;
@@ -69,6 +72,18 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 </CONVERSATION_CONTEXT>`
     : "";
 
+  const fullFileSection = context.fullFileContent
+    ? `
+
+<FULL_FILE_CONTENT>
+Below is the complete content of the file for better context understanding. Use this to understand imports, dependencies, overall structure, and whether changes make sense in the broader context:
+
+\`\`\`
+${context.fullFileContent}
+\`\`\`
+</FULL_FILE_CONTENT>`
+    : "";
+
   const languageInstruction = context.language
     ? `
 
@@ -77,9 +92,25 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 Always answer in ${context.language}`
     : "";
 
+  const contextInstructions = context.fullFileContent
+    ? `
+
+**FULL CONTEXT AVAILABLE:**
+You have access to the complete file content above. Use this context to:
+- Verify that imports are actually used in the code
+- Check if new code follows existing patterns and conventions
+- Identify architectural inconsistencies or violations
+- Ensure changes make sense within the overall file structure
+- Spot missing implementations or unused code
+- Review all changes together to identify patterns across multiple hunks in the same file`
+    : `
+
+**LIMITED CONTEXT:**
+You only have access to the diff hunk. Focus on obvious issues within the visible changes.`;
+
   return `${basePromptRules}${languageInstruction}
 
-${singleFileLineRules}
+${singleFileLineRules}${contextInstructions}
 
 **CONTEXT FOR THE REVIEW:**
 
@@ -91,17 +122,17 @@ ${context.title}
 
 <PULL_REQUEST_DESCRIPTION>
 ${context.description}
-</PULL_REQUEST_DESCRIPTION>${conversationSection}
+</PULL_REQUEST_DESCRIPTION>${conversationSection}${fullFileSection}
 
 <FILE_PATH>
 ${context.filePath}
 </FILE_PATH>
 
-<GIT_DIFF_HUNK_TO_REVIEW>
+<GIT_DIFF_TO_REVIEW>
 \`\`\`diff
 ${context.hunkContent}
 \`\`\`
-</GIT_DIFF_HUNK_TO_REVIEW>`;
+</GIT_DIFF_TO_REVIEW>`;
 }
 
 export function createBatchReviewPrompt(context: BatchReviewContext): string {
@@ -125,9 +156,24 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 Always answer in ${context.language}`
     : "";
 
+  const contextInstructions = context.fullContextAvailable
+    ? `
+
+**FULL CONTEXT AVAILABLE:**
+Many files include complete file content for better context understanding. Use this context to:
+- Verify that imports are actually used in the code
+- Check if changes follow existing patterns and conventions across files
+- Identify architectural inconsistencies between files
+- Ensure changes make sense within the overall project structure
+- Spot missing implementations, unused code, or cross-file dependencies`
+    : `
+
+**LIMITED CONTEXT:**
+You only have access to diff hunks. Focus on obvious issues within the visible changes and cross-file consistency.`;
+
   return `${basePromptRules}${languageInstruction}
 
-${batchFileLineRules}
+${batchFileLineRules}${contextInstructions}
 
 **CONTEXT FOR THE REVIEW:**
 

@@ -3,6 +3,7 @@ import { GitHubService } from "./services/github/index";
 import { BatchProcessor } from "./services/batch-processor";
 import { FileFilterService } from "./services/file-filter-service";
 import { CodeAnalysisService } from "./services/code-analysis-service";
+import { FileContextEnrichmentService } from "./services/file-context-enrichment-service";
 import { ConversationContext } from "./types/conversation";
 import { logger } from "./utils/logger";
 import { parseExcludePatterns, parseDiffToFileData } from "./utils/helpers";
@@ -27,16 +28,24 @@ export class CodeReviewService {
     model?: string,
     enableConversationContext: boolean = true,
     skipDraftPrs: boolean = true,
-    language?: string
+    language?: string,
+    enableFullContext: boolean = true
   ) {
     this.githubService = new GitHubService(githubToken);
     this.fileFilterService = new FileFilterService(excludePatterns);
 
     const aiService = new AIService(geminiApiKey, model, language);
     const batchProcessor = new BatchProcessor();
+
+    // Create file enrichment service if full context is enabled
+    const fileEnrichmentService = enableFullContext
+      ? new FileContextEnrichmentService(this.githubService, enableFullContext)
+      : undefined;
+
     this.codeAnalysisService = new CodeAnalysisService(
       aiService,
-      batchProcessor
+      batchProcessor,
+      fileEnrichmentService
     );
 
     this.enableConversationContext = enableConversationContext;
@@ -63,13 +72,24 @@ export class CodeReviewService {
 
       // Retrieve conversation context for continuing the discussion (if enabled)
       let conversationContext: ConversationContext | undefined;
+      let limitedConversationContext: ConversationContext | undefined;
 
       if (this.enableConversationContext) {
-        conversationContext = await this.githubService.getConversationContext(
-          prDetails.owner,
-          prDetails.repo,
-          prDetails.pullNumber
-        );
+        // Get full context for filtering operations
+        conversationContext =
+          await this.githubService.getFullConversationContext(
+            prDetails.owner,
+            prDetails.repo,
+            prDetails.pullNumber
+          );
+
+        // Get limited context for AI consumption
+        limitedConversationContext =
+          await this.githubService.getLimitedConversationContext(
+            prDetails.owner,
+            prDetails.repo,
+            prDetails.pullNumber
+          );
 
         logContextStats(conversationContext);
       } else {
@@ -124,7 +144,8 @@ export class CodeReviewService {
       const comments = await this.codeAnalysisService.analyzeCodeChanges(
         filteredDiff,
         prDetails,
-        conversationContext
+        conversationContext,
+        limitedConversationContext
       );
 
       if (comments.length > 0) {
@@ -200,6 +221,9 @@ async function main(): Promise<void> {
       ).toLowerCase() === "true";
     const skipDraftPrs =
       (process.env.INPUT_SKIP_DRAFT_PRS || "true").toLowerCase() === "true";
+    const enableFullContext =
+      (process.env.INPUT_ENABLE_FULL_CONTEXT || "true").toLowerCase() ===
+      "true";
     const language = process.env.INPUT_LANGUAGE;
 
     if (!githubToken) {
@@ -216,6 +240,8 @@ async function main(): Promise<void> {
         pkg.version
       }) with model: ${model}, conversation context: ${
         enableConversationContext ? "enabled" : "disabled"
+      }, full context: ${
+        enableFullContext ? "enabled" : "disabled"
       }, skip draft PRs: ${
         skipDraftPrs ? "enabled" : "disabled"
       }, exclude patterns: ${excludePatterns.join(", ")}`
@@ -228,7 +254,8 @@ async function main(): Promise<void> {
       model,
       enableConversationContext,
       skipDraftPrs,
-      language
+      language,
+      enableFullContext
     );
     await codeReviewService.processCodeReview();
 

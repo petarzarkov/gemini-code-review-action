@@ -55,6 +55,7 @@ export class BatchProcessor {
         content: fileContent,
         estimatedTokens,
         originalHunks: file.hunks,
+        fullFileContent: file.fullContent,
       });
       currentTokenCount += estimatedTokens;
     }

@@ -1,4 +1,4 @@
-import { DiffChange, DiffChunk, ParsedFile } from "./types";
+import { DiffChunk, ParsedFile } from "./types";
 
 interface FileChanges {
   oldLines: number;
@@ -298,4 +298,4 @@ const makeString = (itemToConvert: unknown): string =>
   (itemToConvert ?? "") + "";
 
 export default parseDiff;
-export { DiffChange, DiffChunk, ParsedFile } from "./types";
+export { DiffChunk, ParsedFile } from "./types";

@@ -25090,6 +25090,7 @@ const index_1 = __nccwpck_require__(9380);
 const batch_processor_1 = __nccwpck_require__(7951);
 const file_filter_service_1 = __nccwpck_require__(71);
 const code_analysis_service_1 = __nccwpck_require__(6266);
+const file_context_enrichment_service_1 = __nccwpck_require__(3930);
 const logger_1 = __nccwpck_require__(187);
 const helpers_1 = __nccwpck_require__(4482);
 const conversation_context_1 = __nccwpck_require__(2354);
@@ -25100,12 +25101,16 @@ class CodeReviewService {
     codeAnalysisService;
     enableConversationContext;
     skipDraftPrs;
-    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true, skipDraftPrs = true, language) {
+    constructor(githubToken, geminiApiKey, excludePatterns = [], model, enableConversationContext = true, skipDraftPrs = true, language, enableFullContext = true) {
         this.githubService = new index_1.GitHubService(githubToken);
         this.fileFilterService = new file_filter_service_1.FileFilterService(excludePatterns);
         const aiService = new ai_service_1.AIService(geminiApiKey, model, language);
         const batchProcessor = new batch_processor_1.BatchProcessor();
-        this.codeAnalysisService = new code_analysis_service_1.CodeAnalysisService(aiService, batchProcessor);
+        // Create file enrichment service if full context is enabled
+        const fileEnrichmentService = enableFullContext
+            ? new file_context_enrichment_service_1.FileContextEnrichmentService(this.githubService, enableFullContext)
+            : undefined;
+        this.codeAnalysisService = new code_analysis_service_1.CodeAnalysisService(aiService, batchProcessor, fileEnrichmentService);
         this.enableConversationContext = enableConversationContext;
         this.skipDraftPrs = skipDraftPrs;
     }
@@ -25124,8 +25129,14 @@ class CodeReviewService {
             }
             // Retrieve conversation context for continuing the discussion (if enabled)
             let conversationContext;
+            let limitedConversationContext;
             if (this.enableConversationContext) {
-                conversationContext = await this.githubService.getConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber);
+                // Get full context for filtering operations
+                conversationContext =
+                    await this.githubService.getFullConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber);
+                // Get limited context for AI consumption
+                limitedConversationContext =
+                    await this.githubService.getLimitedConversationContext(prDetails.owner, prDetails.repo, prDetails.pullNumber);
                 (0, conversation_context_1.logContextStats)(conversationContext);
             }
             else {
@@ -25151,7 +25162,7 @@ class CodeReviewService {
             logger_1.logger.info(`Files to analyze after filtering: ${filteredDiff
                 .map((f) => f.path)
                 .join(", ")}`);
-            const comments = await this.codeAnalysisService.analyzeCodeChanges(filteredDiff, prDetails, conversationContext);
+            const comments = await this.codeAnalysisService.analyzeCodeChanges(filteredDiff, prDetails, conversationContext, limitedConversationContext);
             if (comments.length > 0) {
                 await this.githubService.createReviewComments(prDetails.owner, prDetails.repo, prDetails.pullNumber, comments);
                 logger_1.logger.success(`Created ${comments.length} review comments`);
@@ -25190,6 +25201,8 @@ async function main() {
         const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
         const enableConversationContext = (process.env.INPUT_ENABLE_CONVERSATION_CONTEXT || "true").toLowerCase() === "true";
         const skipDraftPrs = (process.env.INPUT_SKIP_DRAFT_PRS || "true").toLowerCase() === "true";
+        const enableFullContext = (process.env.INPUT_ENABLE_FULL_CONTEXT || "true").toLowerCase() ===
+            "true";
         const language = process.env.INPUT_LANGUAGE;
         if (!githubToken) {
             throw new Error("GITHUB_TOKEN environment variable is required");
@@ -25198,8 +25211,8 @@ async function main() {
             throw new Error("GEMINI_API_KEY environment variable is required");
         }
         const excludePatterns = (0, helpers_1.parseExcludePatterns)(excludeInput);
-        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, conversation context: ${enableConversationContext ? "enabled" : "disabled"}, skip draft PRs: ${skipDraftPrs ? "enabled" : "disabled"}, exclude patterns: ${excludePatterns.join(", ")}`);
-        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext, skipDraftPrs, language);
+        logger_1.logger.verbose(`🚀 Starting Code Review Action (@v${package_json_1.default.version}) with model: ${model}, conversation context: ${enableConversationContext ? "enabled" : "disabled"}, full context: ${enableFullContext ? "enabled" : "disabled"}, skip draft PRs: ${skipDraftPrs ? "enabled" : "disabled"}, exclude patterns: ${excludePatterns.join(", ")}`);
+        const codeReviewService = new CodeReviewService(githubToken, geminiApiKey, excludePatterns, model, enableConversationContext, skipDraftPrs, language, enableFullContext);
         await codeReviewService.processCodeReview();
         logger_1.logger.success("✨ Code Review completed successfully!");
     }
@@ -25243,8 +25256,9 @@ const basePromptRules = `You are an expert senior software engineer acting as a 
 const singleFileLineRules = `**LINE NUMBERING RULES:**
 
 1.  **Target Added Lines Only:** You MUST only comment on lines that begin with a \`+\` in the diff. NEVER comment on lines starting with \`-\` or a space.
-2.  **1-Based Indexing:** The \`lineNumber\` MUST correspond to the line's position within the provided diff hunk. The first line of the hunk is 1, the second is 2, and so on.
-3.  **Example:** In the hunk below, you could only comment on lines 2, 4, or 5.
+2.  **1-Based Indexing:** The \`lineNumber\` MUST correspond to the line's position within the provided diff. The first line is 1, the second is 2, and so on.
+3.  **Multiple Hunks:** If multiple hunks are provided, treat them as one continuous diff for line numbering purposes.
+4.  **Example:** In the diff below, you could only comment on lines 2, 4, or 5.
     \`\`\`diff
     1   - const oldVar = 1;
     2   + const newVar = 2;
@@ -25272,6 +25286,17 @@ ${context.conversationContext}
 Please build upon the previous feedback where relevant, avoid repeating the same suggestions, and focus on new or updated code that needs attention.
 </CONVERSATION_CONTEXT>`
         : "";
+    const fullFileSection = context.fullFileContent
+        ? `
+
+<FULL_FILE_CONTENT>
+Below is the complete content of the file for better context understanding. Use this to understand imports, dependencies, overall structure, and whether changes make sense in the broader context:
+
+\`\`\`
+${context.fullFileContent}
+\`\`\`
+</FULL_FILE_CONTENT>`
+        : "";
     const languageInstruction = context.language
         ? `
 
@@ -25279,9 +25304,24 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 
 Always answer in ${context.language}`
         : "";
+    const contextInstructions = context.fullFileContent
+        ? `
+
+**FULL CONTEXT AVAILABLE:**
+You have access to the complete file content above. Use this context to:
+- Verify that imports are actually used in the code
+- Check if new code follows existing patterns and conventions
+- Identify architectural inconsistencies or violations
+- Ensure changes make sense within the overall file structure
+- Spot missing implementations or unused code
+- Review all changes together to identify patterns across multiple hunks in the same file`
+        : `
+
+**LIMITED CONTEXT:**
+You only have access to the diff hunk. Focus on obvious issues within the visible changes.`;
     return `${basePromptRules}${languageInstruction}
 
-${singleFileLineRules}
+${singleFileLineRules}${contextInstructions}
 
 **CONTEXT FOR THE REVIEW:**
 
@@ -25293,17 +25333,17 @@ ${context.title}
 
 <PULL_REQUEST_DESCRIPTION>
 ${context.description}
-</PULL_REQUEST_DESCRIPTION>${conversationSection}
+</PULL_REQUEST_DESCRIPTION>${conversationSection}${fullFileSection}
 
 <FILE_PATH>
 ${context.filePath}
 </FILE_PATH>
 
-<GIT_DIFF_HUNK_TO_REVIEW>
+<GIT_DIFF_TO_REVIEW>
 \`\`\`diff
 ${context.hunkContent}
 \`\`\`
-</GIT_DIFF_HUNK_TO_REVIEW>`;
+</GIT_DIFF_TO_REVIEW>`;
 }
 function createBatchReviewPrompt(context) {
     const conversationSection = context.conversationContext
@@ -25324,9 +25364,23 @@ Please build upon the previous feedback where relevant, avoid repeating the same
 
 Always answer in ${context.language}`
         : "";
+    const contextInstructions = context.fullContextAvailable
+        ? `
+
+**FULL CONTEXT AVAILABLE:**
+Many files include complete file content for better context understanding. Use this context to:
+- Verify that imports are actually used in the code
+- Check if changes follow existing patterns and conventions across files
+- Identify architectural inconsistencies between files
+- Ensure changes make sense within the overall project structure
+- Spot missing implementations, unused code, or cross-file dependencies`
+        : `
+
+**LIMITED CONTEXT:**
+You only have access to diff hunks. Focus on obvious issues within the visible changes and cross-file consistency.`;
     return `${basePromptRules}${languageInstruction}
 
-${batchFileLineRules}
+${batchFileLineRules}${contextInstructions}
 
 **CONTEXT FOR THE REVIEW:**
 
@@ -25685,14 +25739,22 @@ class AIService {
         const aiResponses = await this.getAiResponse(prompt, true);
         return aiResponses;
     }
-    async reviewSingle(filePath, hunkContent, prDetails, conversationContext) {
-        const prompt = this.createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext);
+    async reviewSingle(filePath, hunkContent, prDetails, conversationContext, fullFileContent) {
+        const prompt = this.createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext, fullFileContent);
         const aiResponses = await this.getAiResponse(prompt, false);
         return aiResponses;
     }
     createBatchReviewPrompt(batch, prDetails, conversationContext) {
+        const hasFullContext = batch.files.some((file) => file.fullFileContent);
         const filesContent = batch.files
-            .map((file, index) => `File ${index + 1}: ${file.path}\n\`\`\`diff\n${file.content}\n\`\`\``)
+            .map((file, index) => {
+            let content = `File ${index + 1}: ${file.path}\n`;
+            if (file.fullFileContent) {
+                content += `\n**FULL FILE CONTENT:**\n\`\`\`\n${file.fullFileContent}\n\`\`\`\n`;
+            }
+            content += `\n**DIFF TO REVIEW:**\n\`\`\`diff\n${file.content}\n\`\`\``;
+            return content;
+        })
             .join("\n\n");
         const contextString = conversationContext && (0, conversation_context_1.shouldIncludeContext)(conversationContext)
             ? (0, conversation_context_1.summarizeConversationContext)(conversationContext)
@@ -25702,11 +25764,12 @@ class AIService {
             description: prDetails.description || "No description provided",
             filesContent,
             fileCount: batch.files.length,
+            fullContextAvailable: hasFullContext,
             conversationContext: contextString,
             language: this.language,
         });
     }
-    createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext) {
+    createSingleReviewPrompt(filePath, hunkContent, prDetails, conversationContext, fullFileContent) {
         const contextString = conversationContext && (0, conversation_context_1.shouldIncludeContext)(conversationContext)
             ? (0, conversation_context_1.summarizeConversationContext)(conversationContext)
             : undefined;
@@ -25715,6 +25778,7 @@ class AIService {
             title: prDetails.title,
             description: prDetails.description || "No description provided",
             hunkContent,
+            fullFileContent,
             conversationContext: contextString,
             language: this.language,
         });
@@ -25853,6 +25917,7 @@ class BatchProcessor {
                 content: fileContent,
                 estimatedTokens,
                 originalHunks: file.hunks,
+                fullFileContent: file.fullContent,
             });
             currentTokenCount += estimatedTokens;
         }
@@ -25960,18 +26025,27 @@ const logger_1 = __nccwpck_require__(187);
 class CodeAnalysisService {
     aiService;
     batchProcessor;
-    constructor(aiService, batchProcessor) {
+    fileEnrichmentService;
+    constructor(aiService, batchProcessor, fileEnrichmentService) {
         this.aiService = aiService;
         this.batchProcessor = batchProcessor;
+        this.fileEnrichmentService = fileEnrichmentService;
     }
-    async analyzeCodeChanges(files, prDetails, conversationContext) {
+    async analyzeCodeChanges(files, prDetails, conversationContext, limitedConversationContext) {
         logger_1.logger.processing(`Starting analysis of ${files.length} files`);
+        // Enrich files with full context if service is available
+        let enrichedFiles = files;
+        if (this.fileEnrichmentService) {
+            enrichedFiles = await this.fileEnrichmentService.enrichFilesWithContext(files, prDetails);
+        }
+        // Use limited context for AI consumption, full context for filtering
+        const contextForAI = limitedConversationContext || conversationContext;
         // Decide whether to use batch processing or individual file processing
-        if (this.batchProcessor.shouldUseBatching(files)) {
-            return this.analyzeBatchMode(files, prDetails, conversationContext);
+        if (this.batchProcessor.shouldUseBatching(enrichedFiles)) {
+            return this.analyzeBatchMode(enrichedFiles, prDetails, contextForAI);
         }
         else {
-            return this.analyzeIndividualMode(files, prDetails, conversationContext);
+            return this.analyzeIndividualMode(enrichedFiles, prDetails, contextForAI);
         }
     }
     async analyzeBatchMode(files, prDetails, conversationContext) {
@@ -26014,42 +26088,214 @@ class CodeAnalysisService {
     }
     async processFilesIndividually(files, prDetails, conversationContext) {
         const allComments = [];
-        let hunkCount = 0;
-        let totalHunks = 0;
-        // Count total hunks for progress tracking
-        for (const file of files) {
-            if (file.path && file.path !== "/dev/null") {
-                totalHunks += file.hunks.filter((hunk) => hunk.lines.length > 0).length;
-            }
-        }
-        logger_1.logger.info(`Processing ${totalHunks} hunks individually`);
-        for (const file of files) {
-            logger_1.logger.info(`Processing file: ${file.path}`);
+        logger_1.logger.info(`Processing ${files.length} files individually`);
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            logger_1.logger.processing(`Processing file ${i + 1}/${files.length}: ${file.path}`);
             if (!file.path || file.path === "/dev/null") {
                 continue;
             }
-            for (const hunk of file.hunks) {
-                if (hunk.lines.length === 0) {
-                    continue;
-                }
-                hunkCount++;
-                logger_1.logger.processing(`Processing hunk ${hunkCount}/${totalHunks}`);
-                try {
-                    const hunkContent = hunk.lines.join("\n");
-                    const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails, conversationContext);
-                    const comments = (0, helpers_1.createCommentsFromAiResponses)(file.path, hunk, aiResponses);
-                    allComments.push(...comments);
-                }
-                catch (error) {
-                    logger_1.logger.error(`Error processing hunk ${hunkCount}:`, error);
-                }
+            const validHunks = file.hunks.filter((hunk) => hunk.lines.length > 0);
+            if (validHunks.length === 0) {
+                continue;
+            }
+            try {
+                const comments = await this.processFileWithAllHunks(file, prDetails, conversationContext);
+                allComments.push(...comments);
+                logger_1.logger.info(`File ${file.path} generated ${comments.length} comments`);
+            }
+            catch (error) {
+                logger_1.logger.error(`Error processing file ${file.path}:`, error);
             }
         }
         logger_1.logger.success(`Individual processing generated ${allComments.length} comments`);
         return allComments;
     }
+    /**
+     * Process a single file with all its hunks in one AI call to avoid sending
+     * full file content multiple times
+     */
+    async processFileWithAllHunks(file, prDetails, conversationContext) {
+        const validHunks = file.hunks.filter((hunk) => hunk.lines.length > 0);
+        if (validHunks.length === 1) {
+            // Single hunk - use existing single review method
+            const hunkContent = validHunks[0].lines.join("\n");
+            const aiResponses = await this.aiService.reviewSingle(file.path, hunkContent, prDetails, conversationContext, file.fullContent);
+            return (0, helpers_1.createCommentsFromAiResponses)(file.path, validHunks[0], aiResponses);
+        }
+        else {
+            // Multiple hunks - combine them but send full file content only once
+            return this.processMultipleHunksForFile(file, validHunks, prDetails, conversationContext);
+        }
+    }
+    /**
+     * Process multiple hunks for a single file by combining them into one request
+     */
+    async processMultipleHunksForFile(file, hunks, prDetails, conversationContext) {
+        // Combine all hunks into a single diff content
+        const combinedHunkContent = hunks
+            .map((hunk) => `${hunk.header}\n${hunk.lines.join("\n")}`)
+            .join("\n\n");
+        const aiResponses = await this.aiService.reviewSingle(file.path, combinedHunkContent, prDetails, conversationContext, file.fullContent);
+        // Map AI responses back to individual hunks using the specialized function
+        return (0, helpers_1.createCommentsFromAiResponsesForMultipleHunks)(file.path, hunks, aiResponses);
+    }
 }
 exports.CodeAnalysisService = CodeAnalysisService;
+
+
+/***/ }),
+
+/***/ 3930:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FileContextEnrichmentService = void 0;
+const logger_1 = __nccwpck_require__(187);
+/**
+ * Service for enriching FileData with complete file contents to provide better context to AI
+ */
+class FileContextEnrichmentService {
+    githubService;
+    enableFullContext;
+    maxFileSize = 5000; // Max characters per file for context
+    constructor(githubService, enableFullContext = true) {
+        this.githubService = githubService;
+        this.enableFullContext = enableFullContext;
+    }
+    /**
+     * Enriches file data with complete file contents for better AI context
+     */
+    async enrichFilesWithContext(files, prDetails) {
+        if (!this.enableFullContext) {
+            logger_1.logger.debug("Full context enrichment is disabled");
+            return files;
+        }
+        if (!prDetails.headSha) {
+            logger_1.logger.warn("No head SHA available, cannot enrich files with full context");
+            return files;
+        }
+        logger_1.logger.processing(`Enriching ${files.length} files with full context`);
+        try {
+            // Extract file paths that are not deleted
+            const filePaths = files
+                .filter((file) => file.path && file.path !== "/dev/null")
+                .map((file) => file.path);
+            if (filePaths.length === 0) {
+                logger_1.logger.debug("No valid file paths to enrich");
+                return files;
+            }
+            // Fetch all file contents in parallel
+            const fileContents = await this.githubService.getMultipleFileContents(prDetails.owner, prDetails.repo, filePaths, prDetails.headSha);
+            // Enrich each file with its content (with size limits)
+            const enrichedFiles = files.map((file) => {
+                if (!file.path || file.path === "/dev/null") {
+                    return file;
+                }
+                const content = fileContents.get(file.path);
+                if (content) {
+                    // Smart content truncation for large files
+                    const optimizedContent = this.optimizeFileContent(content, file);
+                    return {
+                        ...file,
+                        fullContent: optimizedContent,
+                        encoding: "utf-8",
+                    };
+                }
+                else {
+                    logger_1.logger.debug(`Could not fetch content for ${file.path}`);
+                    return file;
+                }
+            });
+            const enrichedCount = enrichedFiles.filter((f) => f.fullContent).length;
+            logger_1.logger.success(`Successfully enriched ${enrichedCount}/${files.length} files with full context`);
+            return enrichedFiles;
+        }
+        catch (error) {
+            logger_1.logger.error("Error enriching files with context:", error);
+            logger_1.logger.warn("Falling back to diff-only mode");
+            return files;
+        }
+    }
+    /**
+     * Enable or disable full context enrichment
+     */
+    setEnabled(enabled) {
+        this.enableFullContext = enabled;
+        logger_1.logger.info(`Full context enrichment ${enabled ? "enabled" : "disabled"}`);
+    }
+    /**
+     * Check if full context enrichment is enabled
+     */
+    isEnabled() {
+        return this.enableFullContext;
+    }
+    /**
+     * Optimizes file content for AI context by truncating large files intelligently
+     */
+    optimizeFileContent(content, file) {
+        if (content.length <= this.maxFileSize) {
+            return content; // Small file, include everything
+        }
+        logger_1.logger.debug(`Optimizing large file content for ${file.path} (${content.length} chars)`);
+        // For large files, try to include:
+        // 1. Top of file (imports, types, etc.)
+        // 2. Areas around the changed lines
+        // 3. Key structural elements
+        const lines = content.split("\n");
+        const totalLines = lines.length;
+        const keepLines = new Set();
+        // Always include top of file (imports, interfaces, etc.)
+        const topLines = Math.min(50, Math.floor(totalLines * 0.1));
+        for (let i = 0; i < topLines; i++) {
+            keepLines.add(i);
+        }
+        // Find changed line ranges from hunks
+        for (const hunk of file.hunks) {
+            const hunkHeader = hunk.header;
+            // Extract line numbers from hunk header like "@@-20,6 +21,7 @@"
+            const match = hunkHeader.match(/@@ -\d+,?\d* \+(\d+),?\d* @@/);
+            if (match) {
+                const startLine = parseInt(match[1]) - 1; // Convert to 0-based
+                // Include context around changed lines
+                const contextRadius = 25; // Lines before and after changes
+                for (let i = Math.max(0, startLine - contextRadius); i <
+                    Math.min(totalLines, startLine + contextRadius + hunk.lines.length); i++) {
+                    keepLines.add(i);
+                }
+            }
+        }
+        // Include key structural lines (class/function definitions)
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.match(/^(export\s+)?(class|interface|function|const\s+\w+\s*=|type\s+)/)) {
+                keepLines.add(i);
+                // Include a few lines after class/function definitions
+                for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                    keepLines.add(j);
+                }
+            }
+        }
+        // Convert set to sorted array and build optimized content
+        const linesToKeep = Array.from(keepLines).sort((a, b) => a - b);
+        const optimizedLines = [];
+        let lastIncludedLine = -2;
+        for (const lineNum of linesToKeep) {
+            if (lineNum > lastIncludedLine + 1) {
+                // Add ellipsis for gaps
+                optimizedLines.push("// ... [truncated] ...");
+            }
+            optimizedLines.push(lines[lineNum]);
+            lastIncludedLine = lineNum;
+        }
+        const optimizedContent = optimizedLines.join("\n");
+        logger_1.logger.debug(`Optimized ${file.path}: ${content.length} → ${optimizedContent.length} chars`);
+        return optimizedContent;
+    }
+}
+exports.FileContextEnrichmentService = FileContextEnrichmentService;
 
 
 /***/ }),
@@ -26167,6 +26413,7 @@ class GitHubEventService {
             pullNumber: eventData.pull_request.number,
             title: eventData.pull_request.title,
             description: eventData.pull_request.body || "",
+            headSha: eventData.pull_request.head?.sha,
         };
     }
     isPullRequestDraft() {
@@ -26183,6 +26430,111 @@ class GitHubEventService {
     }
 }
 exports.GitHubEventService = GitHubEventService;
+
+
+/***/ }),
+
+/***/ 6294:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GitHubFileContentService = void 0;
+const logger_1 = __nccwpck_require__(187);
+/**
+ * Service for fetching file contents from GitHub repository
+ */
+class GitHubFileContentService {
+    octokit;
+    fileContentCache = new Map();
+    constructor(octokit) {
+        this.octokit = octokit;
+    }
+    /**
+     * Get the complete content of a file at a specific commit SHA
+     */
+    async getFileContent(owner, repo, path, ref) {
+        const cacheKey = `${owner}/${repo}/${path}@${ref}`;
+        // Check cache first
+        if (this.fileContentCache.has(cacheKey)) {
+            return this.fileContentCache.get(cacheKey);
+        }
+        try {
+            logger_1.logger.debug(`Fetching file content for ${path} at ${ref}`);
+            const response = await this.octokit.repos.getContent({
+                owner,
+                repo,
+                path,
+                ref,
+            });
+            // GitHub API returns different structures for files vs directories
+            if (Array.isArray(response.data)) {
+                logger_1.logger.warn(`Path ${path} is a directory, not a file`);
+                return null;
+            }
+            const data = response.data;
+            if (data.type !== "file") {
+                logger_1.logger.warn(`Path ${path} is not a file (type: ${data.type})`);
+                return null;
+            }
+            let content;
+            if (data.encoding === "base64") {
+                content = Buffer.from(data.content, "base64").toString("utf-8");
+            }
+            else {
+                content = data.content;
+            }
+            const fileContent = {
+                path,
+                content,
+                encoding: data.encoding,
+                sha: data.sha,
+            };
+            // Cache the result
+            this.fileContentCache.set(cacheKey, fileContent);
+            return fileContent;
+        }
+        catch (error) {
+            if (error.status === 404) {
+                logger_1.logger.debug(`File not found: ${path} at ${ref}`);
+                return null;
+            }
+            logger_1.logger.error(`Error fetching file content for ${path}:`, error);
+            return null;
+        }
+    }
+    /**
+     * Get multiple file contents in parallel
+     */
+    async getMultipleFileContents(owner, repo, filePaths, ref) {
+        const results = new Map();
+        const promises = filePaths.map(async (path) => {
+            const content = await this.getFileContent(owner, repo, path, ref);
+            if (content) {
+                results.set(path, content);
+            }
+        });
+        await Promise.all(promises);
+        return results;
+    }
+    /**
+     * Clear the internal cache
+     */
+    clearCache() {
+        this.fileContentCache.clear();
+    }
+    /**
+     * Get cache statistics
+     */
+    getCacheStats() {
+        return {
+            size: this.fileContentCache.size,
+            keys: Array.from(this.fileContentCache.keys()),
+        };
+    }
+}
+exports.GitHubFileContentService = GitHubFileContentService;
 
 
 /***/ }),
@@ -26550,6 +26902,7 @@ const event_service_1 = __nccwpck_require__(2146);
 const diff_service_1 = __nccwpck_require__(7359);
 const review_service_1 = __nccwpck_require__(7092);
 const graphql_service_1 = __nccwpck_require__(211);
+const file_content_service_1 = __nccwpck_require__(6294);
 const logger_1 = __nccwpck_require__(187);
 const package_json_1 = __importDefault(__nccwpck_require__(8330));
 class GitHubService {
@@ -26558,12 +26911,14 @@ class GitHubService {
     diffService;
     reviewService;
     graphqlService;
+    fileContentService;
     constructor(githubToken) {
         this.octokit = new rest_1.Octokit({ auth: githubToken });
         this.eventService = new event_service_1.GitHubEventService();
         this.diffService = new diff_service_1.GitHubDiffService(this.octokit);
         this.reviewService = new review_service_1.GitHubReviewService(this.octokit);
         this.graphqlService = new graphql_service_1.GitHubGraphQLService(this.octokit, githubToken);
+        this.fileContentService = new file_content_service_1.GitHubFileContentService(this.octokit);
     }
     getPullRequestDetails() {
         return this.eventService.getPullRequestDetails();
@@ -26581,6 +26936,9 @@ class GitHubService {
         return this.diffService.getPullRequestCommits(owner, repo, pullNumber);
     }
     async getConversationContext(owner, repo, pullNumber) {
+        return this.getFullConversationContext(owner, repo, pullNumber);
+    }
+    async getFullConversationContext(owner, repo, pullNumber) {
         try {
             logger_1.logger.processing(`Retrieving conversation context for PR #${pullNumber}`);
             // Get existing reviews, comments, and commits from this PR
@@ -26612,11 +26970,11 @@ class GitHubService {
             // Identify resolved comments using the GraphQL service
             const resolvedComments = await this.graphqlService.identifyResolvedComments(owner, repo, pullNumber, actionComments);
             const context = {
-                previousReviews: actionReviews,
-                previousComments: actionComments,
-                conversationHistory: actionIssueComments,
-                commits: commits,
-                resolvedComments: resolvedComments,
+                previousReviews: actionReviews, // Keep all reviews for full context
+                previousComments: actionComments, // Keep all comments for full context
+                conversationHistory: actionIssueComments, // Keep all conversations for full context
+                commits: commits, // Keep all commits for full context
+                resolvedComments: resolvedComments, // Keep all resolved comments for filtering
             };
             logger_1.logger.info(`Retrieved context: ${context.previousReviews.length} reviews, ` +
                 `${context.previousComments.length} comments, ` +
@@ -26636,8 +26994,80 @@ class GitHubService {
             };
         }
     }
+    async getLimitedConversationContext(owner, repo, pullNumber) {
+        try {
+            logger_1.logger.processing(`Retrieving limited conversation context for PR #${pullNumber}`);
+            // Get commits for the PR
+            const commits = await this.getPullRequestCommits(owner, repo, pullNumber);
+            // Get all reviews and comments for the PR
+            const reviews = await this.octokit.pulls.listReviews({
+                owner,
+                repo,
+                pull_number: pullNumber,
+            });
+            const comments = await this.octokit.pulls.listReviewComments({
+                owner,
+                repo,
+                pull_number: pullNumber,
+            });
+            // Filter to only include bot reviews and comments
+            const actionReviews = reviews.data.filter((review) => review.state === "COMMENTED" &&
+                review.user?.login === "github-actions[bot]");
+            const actionComments = comments.data.filter((comment) => comment.user?.login === "github-actions[bot]");
+            // Get PR conversations (issue comments)
+            const issueComments = await this.octokit.issues.listComments({
+                owner,
+                repo,
+                issue_number: pullNumber,
+            });
+            const actionIssueComments = issueComments.data.filter((comment) => comment.user?.login === "github-actions[bot]" &&
+                comment.body?.includes(`<!-- [${package_json_1.default.name}:context] -->`));
+            // Identify resolved comments using the GraphQL service
+            const resolvedComments = await this.graphqlService.identifyResolvedComments(owner, repo, pullNumber, actionComments);
+            // Apply limits for AI consumption
+            const maxReviews = 2;
+            const maxComments = 15;
+            const maxConversations = 2;
+            const maxCommits = 10;
+            const context = {
+                previousReviews: actionReviews.slice(-maxReviews), // Limited for AI
+                previousComments: actionComments.slice(-maxComments), // Limited for AI
+                conversationHistory: actionIssueComments.slice(-maxConversations), // Limited for AI
+                commits: commits.slice(-maxCommits), // Limited for AI
+                resolvedComments: resolvedComments, // Keep all resolved comments for filtering
+            };
+            logger_1.logger.info(`Retrieved limited context: ${context.previousReviews.length} reviews, ` +
+                `${context.previousComments.length} comments, ` +
+                `${context.conversationHistory.length} conversation entries, ` +
+                `${context.commits.length} commits`);
+            return context;
+        }
+        catch (error) {
+            logger_1.logger.error("Error retrieving limited conversation context:", error);
+            // Return empty context on error to allow processing to continue
+            return {
+                previousReviews: [],
+                previousComments: [],
+                conversationHistory: [],
+                commits: [],
+                resolvedComments: [],
+            };
+        }
+    }
     async saveConversationContext(owner, repo, pullNumber, contextSummary, reviewCount = 1) {
         return this.reviewService.saveConversationContext(owner, repo, pullNumber, contextSummary, reviewCount);
+    }
+    async getFileContent(owner, repo, path, ref) {
+        const fileContent = await this.fileContentService.getFileContent(owner, repo, path, ref);
+        return fileContent?.content || null;
+    }
+    async getMultipleFileContents(owner, repo, filePaths, ref) {
+        const fileContents = await this.fileContentService.getMultipleFileContents(owner, repo, filePaths, ref);
+        const result = new Map();
+        for (const [path, content] of fileContents.entries()) {
+            result.set(path, content.content);
+        }
+        return result;
     }
 }
 exports.GitHubService = GitHubService;
@@ -26666,8 +27096,8 @@ function shouldIncludeContext(context) {
     if (totalItems > 0) {
         // Calculate estimated context size
         const estimatedSize = estimateContextSize(context);
-        // Don't include if context is too large (>2000 characters)
-        if (estimatedSize > 2000) {
+        // Don't include if context is too large (>8192 characters)
+        if (estimatedSize > 8192) {
             logger_1.logger.debug(`Context too large (${estimatedSize} chars), including summarized version`);
             return true; // We'll use summarized version
         }
@@ -26794,10 +27224,13 @@ exports.createResolvedCommentsSummary = createResolvedCommentsSummary;
  */
 function summarizeConversationContext(context) {
     const parts = [];
+    // Context is now pre-limited at source, so we can be less aggressive
+    const reviewLimit = Math.min(context.previousReviews.length, 2);
+    const fileLimit = 3;
     // Add summary of previous reviews
     if (context.previousReviews.length > 0) {
         const reviewSummary = context.previousReviews
-            .slice(-3) // Only include last 3 reviews to avoid token limit
+            .slice(-reviewLimit) // Dynamic limit based on context size
             .map((review, index) => {
             const date = new Date(review.submitted_at || new Date().toISOString()).toLocaleDateString();
             const cleanBody = review.body
@@ -26805,17 +27238,16 @@ function summarizeConversationContext(context) {
                 .replace(/\[.*?\]/g, "") // Remove markdown links
                 .trim();
             const firstLine = cleanBody.split("\n")[0] || cleanBody;
-            const preview = firstLine.length > 100
-                ? firstLine.substring(0, 100) + "..."
+            const preview = firstLine.length > 80
+                ? firstLine.substring(0, 80) + "..."
                 : firstLine;
             return `  ${index + 1}. Review from ${date}: ${preview}`;
         })
             .join("\n");
         parts.push(`**Previous Reviews (${context.previousReviews.length} total, showing latest):**\n${reviewSummary}`);
     }
-    // Add summary of key comments
+    // Add summary of key comments (trim for AI consumption while keeping full context available)
     if (context.previousComments.length > 0) {
-        const uniqueFiles = new Set(context.previousComments.map((c) => c.path));
         const commentsByFile = new Map();
         context.previousComments.forEach((comment) => {
             if (!commentsByFile.has(comment.path)) {
@@ -26824,10 +27256,10 @@ function summarizeConversationContext(context) {
             commentsByFile.get(comment.path).push(comment);
         });
         const fileSummaries = Array.from(commentsByFile.entries())
-            .slice(-5) // Limit to 5 most recent files
+            .slice(-fileLimit) // Dynamic limit based on context size
             .map(([filePath, comments]) => {
             const recentComments = comments
-                .slice(-2) // Most recent 2 comments per file
+                .slice(-1) // Most recent 1 comment per file for AI consumption
                 .map((comment) => {
                 const body = comment.body || "";
                 const cleanBody = body
@@ -26835,8 +27267,8 @@ function summarizeConversationContext(context) {
                     .replace(/\[.*?\]/g, "")
                     .trim();
                 const firstLine = cleanBody.split("\n")[0] || cleanBody;
-                const preview = firstLine.length > 80
-                    ? firstLine.substring(0, 80) + "..."
+                const preview = firstLine.length > 60
+                    ? firstLine.substring(0, 60) + "..."
                     : firstLine;
                 return `    - Line ${comment.line || "?"}: ${preview}`;
             })
@@ -26993,6 +27425,7 @@ exports.parseExcludePatterns = parseExcludePatterns;
 exports.interpolate = interpolate;
 exports.parseDiffToFileData = parseDiffToFileData;
 exports.createCommentsFromAiResponses = createCommentsFromAiResponses;
+exports.createCommentsFromAiResponsesForMultipleHunks = createCommentsFromAiResponsesForMultipleHunks;
 const diff_parser_1 = __importDefault(__nccwpck_require__(3855));
 function createPatternRegex(pattern) {
     const escapedPattern = pattern
@@ -27075,6 +27508,46 @@ function createCommentsFromAiResponses(filePath, hunk, aiResponses) {
                 position: position, // Use our calculated, trusted position
             };
             comments.push(comment);
+        }
+        catch (error) {
+            console.error("Error creating comment from AI response:", error, aiResponse);
+        }
+    }
+    return comments;
+}
+function createCommentsFromAiResponsesForMultipleHunks(filePath, hunks, aiResponses) {
+    const comments = [];
+    for (const aiResponse of aiResponses) {
+        try {
+            const { lineContent } = aiResponse;
+            // The line content from the AI must be a non-empty string and start with '+'
+            if (!lineContent || !lineContent.trim().startsWith("+")) {
+                continue;
+            }
+            const normalizedAiLine = lineContent.trim().replace(/\s+/g, " ");
+            // Find the line in the specific hunk and use that hunk's position system
+            let found = false;
+            for (const hunk of hunks) {
+                for (let i = 0; i < hunk.lines.length; i++) {
+                    const hunkLine = hunk.lines[i];
+                    const normalizedHunkLine = hunkLine.trim().replace(/\s+/g, " ");
+                    if (normalizedHunkLine === normalizedAiLine) {
+                        // Create a comment using the single hunk function to get correct positioning
+                        const hunkComments = createCommentsFromAiResponses(filePath, hunk, [aiResponse] // Pass just this one response
+                        );
+                        if (hunkComments.length > 0) {
+                            comments.push(...hunkComments);
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if (found)
+                    break;
+            }
+            if (!found) {
+                console.warn(`Could not find line "${lineContent}" in any hunk for file ${filePath}`);
+            }
         }
         catch (error) {
             console.error("Error creating comment from AI response:", error, aiResponse);
@@ -50127,7 +50600,7 @@ module.exports = /*#__PURE__*/JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.3","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0","@octokit/graphql":"9.0.1"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
+module.exports = /*#__PURE__*/JSON.parse('{"name":"gemini-code-review-action","version":"1.1.4","description":"An AI code review GitHub Action using Google Gemini.","main":"dist/index.js","scripts":{"prebuild":"rm -rf dist","build":"ncc build src/code-review.ts -o dist --source-map --license licenses.txt","build:test":"ncc build src/test-code-review.ts -o build --source-map --license licenses.txt","test:prod":"pnpm build:test && dotenv -e .env -- node ./build/index.js","dev":"dotenv -e .env -- ts-node src/test-code-review.ts"},"engines":{"node":">=22.17"},"keywords":["github","actions","ai","code-review","gemini"],"author":{"name":"Petar Zarkov","url":"https://github.com/petarzarkov"},"repository":{"type":"git","url":"https://github.com/petarzarkov/gemini-code-review-action"},"license":"MIT","dependencies":{"@google/genai":"1.13.0","@octokit/rest":"22.0.0","@octokit/graphql":"9.0.1"},"devDependencies":{"@types/node":"24.2.0","@vercel/ncc":"0.38.3","dotenv-cli":"8.0.0","ts-node":"10.9.2","typescript":"5.9.2"},"packageManager":"pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"}');
 
 /***/ })
 

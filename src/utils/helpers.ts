@@ -1,11 +1,8 @@
 import { ReviewComment } from "../types/github";
 import { FileData, HunkData } from "../types/diff";
 import { AiReviewResponse } from "../types/ai";
-import parseDiff, {
-  ParsedFile,
-  DiffChunk,
-  DiffChange,
-} from "../parsers/diff-parser";
+import parseDiff, { ParsedFile, DiffChunk } from "../parsers/diff-parser";
+import { DiffChange } from "../parsers/types";
 
 function createPatternRegex(pattern: string): RegExp {
   const escapedPattern = pattern
@@ -112,6 +109,68 @@ export function createCommentsFromAiResponses(
       };
 
       comments.push(comment);
+    } catch (error) {
+      console.error(
+        "Error creating comment from AI response:",
+        error,
+        aiResponse
+      );
+    }
+  }
+
+  return comments;
+}
+
+export function createCommentsFromAiResponsesForMultipleHunks(
+  filePath: string,
+  hunks: HunkData[],
+  aiResponses: AiReviewResponse[]
+): ReviewComment[] {
+  const comments: ReviewComment[] = [];
+
+  for (const aiResponse of aiResponses) {
+    try {
+      const { lineContent } = aiResponse;
+
+      // The line content from the AI must be a non-empty string and start with '+'
+      if (!lineContent || !lineContent.trim().startsWith("+")) {
+        continue;
+      }
+
+      const normalizedAiLine = lineContent.trim().replace(/\s+/g, " ");
+
+      // Find the line in the specific hunk and use that hunk's position system
+      let found = false;
+
+      for (const hunk of hunks) {
+        for (let i = 0; i < hunk.lines.length; i++) {
+          const hunkLine = hunk.lines[i];
+          const normalizedHunkLine = hunkLine.trim().replace(/\s+/g, " ");
+
+          if (normalizedHunkLine === normalizedAiLine) {
+            // Create a comment using the single hunk function to get correct positioning
+            const hunkComments = createCommentsFromAiResponses(
+              filePath,
+              hunk,
+              [aiResponse] // Pass just this one response
+            );
+
+            if (hunkComments.length > 0) {
+              comments.push(...hunkComments);
+            }
+
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+
+      if (!found) {
+        console.warn(
+          `Could not find line "${lineContent}" in any hunk for file ${filePath}`
+        );
+      }
     } catch (error) {
       console.error(
         "Error creating comment from AI response:",

@@ -20,8 +20,8 @@ export function shouldIncludeContext(context: ConversationContext): boolean {
     // Calculate estimated context size
     const estimatedSize = estimateContextSize(context);
 
-    // Don't include if context is too large (>2000 characters)
-    if (estimatedSize > 2000) {
+    // Don't include if context is too large (>8192 characters)
+    if (estimatedSize > 8192) {
       logger.debug(
         `Context too large (${estimatedSize} chars), including summarized version`
       );

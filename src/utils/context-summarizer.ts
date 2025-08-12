@@ -12,10 +12,14 @@ export function summarizeConversationContext(
 ): string {
   const parts: string[] = [];
 
+  // Context is now pre-limited at source, so we can be less aggressive
+  const reviewLimit = Math.min(context.previousReviews.length, 2);
+  const fileLimit = 3;
+
   // Add summary of previous reviews
   if (context.previousReviews.length > 0) {
     const reviewSummary = context.previousReviews
-      .slice(-3) // Only include last 3 reviews to avoid token limit
+      .slice(-reviewLimit) // Dynamic limit based on context size
       .map((review, index) => {
         const date = new Date(
           review.submitted_at || new Date().toISOString()
@@ -27,8 +31,8 @@ export function summarizeConversationContext(
 
         const firstLine = cleanBody.split("\n")[0] || cleanBody;
         const preview =
-          firstLine.length > 100
-            ? firstLine.substring(0, 100) + "..."
+          firstLine.length > 80
+            ? firstLine.substring(0, 80) + "..."
             : firstLine;
 
         return `  ${index + 1}. Review from ${date}: ${preview}`;
@@ -40,9 +44,8 @@ export function summarizeConversationContext(
     );
   }
 
-  // Add summary of key comments
+  // Add summary of key comments (trim for AI consumption while keeping full context available)
   if (context.previousComments.length > 0) {
-    const uniqueFiles = new Set(context.previousComments.map((c) => c.path));
     const commentsByFile = new Map<string, typeof context.previousComments>();
 
     context.previousComments.forEach((comment) => {
@@ -53,10 +56,10 @@ export function summarizeConversationContext(
     });
 
     const fileSummaries = Array.from(commentsByFile.entries())
-      .slice(-5) // Limit to 5 most recent files
+      .slice(-fileLimit) // Dynamic limit based on context size
       .map(([filePath, comments]) => {
         const recentComments = comments
-          .slice(-2) // Most recent 2 comments per file
+          .slice(-1) // Most recent 1 comment per file for AI consumption
           .map((comment) => {
             const body = comment.body || "";
             const cleanBody = body
@@ -65,8 +68,8 @@ export function summarizeConversationContext(
               .trim();
             const firstLine = cleanBody.split("\n")[0] || cleanBody;
             const preview =
-              firstLine.length > 80
-                ? firstLine.substring(0, 80) + "..."
+              firstLine.length > 60
+                ? firstLine.substring(0, 60) + "..."
                 : firstLine;
             return `    - Line ${comment.line || "?"}: ${preview}`;
           })

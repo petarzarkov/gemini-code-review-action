@@ -18,6 +18,7 @@ export class GitHubEventService {
       pullNumber: eventData.pull_request.number,
       title: eventData.pull_request.title,
       description: eventData.pull_request.body || "",
+      headSha: eventData.pull_request.head?.sha,
     };
   }
 

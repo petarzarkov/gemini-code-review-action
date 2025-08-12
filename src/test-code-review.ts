@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { CodeReviewService } from "./code-review";
+import { Octokit } from "@octokit/rest";
 
 async function testCodeReview(): Promise<void> {
   try {
@@ -21,17 +22,47 @@ async function testCodeReview(): Promise<void> {
       throw new Error("GEMINI_API_KEY environment variable is required");
     }
 
-    // Mock GitHub event data for testing
+    // Get repository and PR info from environment
+    const repoFullName = process.env.TEST_REPO || "owner/repo";
+    const prNumber = parseInt(process.env.TEST_PR_NUMBER || "1");
+    const [owner, repo] = repoFullName.split("/");
+
+    // Fetch actual PR data from GitHub API to get head SHA
+    console.log(`Fetching PR data for ${repoFullName}#${prNumber}...`);
+    const octokit = new Octokit({ auth: githubToken });
+
+    let prData;
+    try {
+      const response = await octokit.pulls.get({
+        owner,
+        repo,
+        pull_number: prNumber,
+      });
+      prData = response.data;
+    } catch (error: any) {
+      if (error.status === 404) {
+        console.error(
+          `PR #${prNumber} not found in repository ${repoFullName}`
+        );
+        throw new Error(
+          `PR #${prNumber} not found. Make sure TEST_REPO and TEST_PR_NUMBER are correct.`
+        );
+      }
+      throw error;
+    }
+
+    // Mock GitHub event data for testing with real PR data
     const mockEventData = {
       repository: {
-        full_name: process.env.TEST_REPO || "owner/repo",
+        full_name: repoFullName,
       },
       pull_request: {
-        number: parseInt(process.env.TEST_PR_NUMBER || "1"),
-        title: process.env.TEST_PR_TITLE || "Test Pull Request",
-        body:
-          process.env.TEST_PR_DESCRIPTION ||
-          "Test PR description for manual testing",
+        number: prData.number,
+        title: prData.title,
+        body: prData.body || "No description provided",
+        head: {
+          sha: prData.head.sha,
+        },
       },
     };
 
@@ -47,6 +78,7 @@ async function testCodeReview(): Promise<void> {
     console.log(`- Repository: ${mockEventData.repository.full_name}`);
     console.log(`- PR Number: ${mockEventData.pull_request.number}`);
     console.log(`- PR Title: ${mockEventData.pull_request.title}`);
+    console.log(`- Head SHA: ${mockEventData.pull_request.head.sha}`);
     console.log(`- Exclude patterns: ${excludeInput || "None"}`);
     console.log("");
 
@@ -64,7 +96,8 @@ async function testCodeReview(): Promise<void> {
       model,
       true, // enableConversationContext
       true, // skipDraftPrs
-      language
+      language,
+      true // enableFullContext
     );
 
     console.log("Starting code review process...\n");

@@ -27,6 +27,11 @@ inputs:
     description: "The language for AI responses (e.g., 'English', 'Spanish', 'French', 'German', etc.). The AI will provide code review comments in the specified language."
     required: false
 
+  enable_full_context:
+    description: "Enable full file context to provide the AI with complete file contents alongside diffs. This helps the AI better understand imports, dependencies, and code relationships, resulting in more accurate reviews."
+    required: false
+    default: "true"
+
 runs:
   using: "node20"
   main: "dist/index.js"
