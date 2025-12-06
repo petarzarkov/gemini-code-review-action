@@ -10,7 +10,7 @@ async function testCodeReview(): Promise<void> {
     const githubToken = process.env.GITHUB_TOKEN;
     const geminiApiKey = process.env.GEMINI_API_KEY;
     const excludeInput = process.env.INPUT_EXCLUDE || "";
-    const model = process.env.INPUT_MODEL || "gemini-2.5-pro";
+    const model = process.env.INPUT_MODEL || "gemini-3-pro-preview";
     const language = process.env.INPUT_LANGUAGE;
 
     if (!githubToken) {

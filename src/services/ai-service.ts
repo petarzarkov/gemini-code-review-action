@@ -29,10 +29,11 @@ export class AIService {
   constructor(geminiApiKey: string, model?: string, language?: string) {
     this.genAi = new GoogleGenAI({ apiKey: geminiApiKey });
     this.currentModelName =
-      model || process.env.GEMINI_MODEL || "gemini-2.5-pro";
+      model || process.env.GEMINI_MODEL || "gemini-3-pro-preview";
     this.language = language;
 
     this.rpmLimits = {
+      "gemini-3-pro-preview": 5,
       "gemini-2.5-pro": 5,
       "gemini-2.5-flash": 10,
       "gemini-2.5-flash-lite": 15,
